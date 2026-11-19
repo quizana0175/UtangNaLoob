@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Utang na Loob | Automated Micro-Lending Portal</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM Standalone -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for runtime JSX transpilation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              100: '#d1fae5',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857'
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useContext, createContext } = React;
+
+    const API_BASE_URL = 'http://localhost:8080/api';
+
+    const getAuthToken = () => localStorage.getItem('token');
+    const setAuthToken = (t) => t ? localStorage.setItem('token', t) : localStorage.removeItem('token');
+    const getStoredUser = () => {
+      try {
+        const u = localStorage.getItem('user');
+        return u ? JSON.parse(u) : null;
+      } catch (e) {
+        return null;
+      }
+    };
+    const setStoredUser = (u) => u ? localStorage.setItem('user', JSON.stringify(u)) : localStorage.removeItem('user');
+    const removeAuth = () => {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+    };
+
+    async function request(endpoint, options = {}) {
+      const token = getAuthToken();
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(options.headers || {})
+      };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`${API_BASE_URL}${endpoint}`, { ...options, headers });
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          removeAuth();
+          window.dispatchEvent(new Event('auth:unauthorized'));
+        }
+        const msg = data?.message || data?.error || `Request failed with status ${res.status}`;
+        const err = new Error(msg);
+        err.status = res.status;
+        err.data = data;
+        throw err;
+      }
+      return data;
+    }
+
+    const authApi = {
+      login: (creds) => request('/auth/login', { method: 'POST', body: JSON.stringify(creds) }),
+      register: (data) => request('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+      logout: () => request('/auth/logout', { method: 'POST' }),
+      getCurrentUser: () => request('/auth/me')
+    };
+
+    const borrowerApi = {
+      getDashboard: () => request('/borrower/dashboard'),
+      submitKyc: (d) => request('/borrower/kyc/submit', { method: 'POST', body: JSON.stringify(d) }),
+      requestLoan: (d) => request('/borrower/loans/request', { method: 'POST', body: JSON.stringify(d) }),
+      getMyLoans: () => request('/borrower/loans'),
+      payInstallment: (d) => request('/borrower/loans/pay', { method: 'POST', body: JSON.stringify(d) }),
+      getPaymentHistory: () => request('/borrower/loans/payments')
+    };
+
+    const underwriterApi = {
+      getQueue: () => request('/underwriter/queue'),
+      reviewApplicant: (id, d) => request(`/underwriter/review/${id}`, { method: 'POST', body: JSON.stringify(d) })
+    };
+
+    const adminApi = {
+      getMetrics: () => request('/admin/metrics'),
+      getUsers: () => request('/admin/users'),
+      updateUserRoles: (id, roles) => request(`/admin/users/${id}/roles`, { method: 'PUT', body: JSON.stringify({ roles }) }),
+      toggleUserStatus: (id) => request(`/admin/users/${id}/toggle-status`, { method: 'PATCH' }),
+      getParameters: () => request('/admin/parameters'),
+      updateParameter: (key, paramValue) => request(`/admin/parameters/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ paramValue }) }),
+      getAuditLogs: () => request('/admin/audit-logs')
+    };
+
+    const AuthContext = createContext(null);
+
+    function AuthProvider({ children }) {
+      const [user, setUser] = useState(getStoredUser());
+      const [token, setToken] = useState(getAuthToken());
+
+      useEffect(() => {
+        const handleUnauthorized = () => {
+          setUser(null);
+          setToken(null);
+          removeAuth();
+        };
+        window.addEventListener('auth:unauthorized', handleUnauthorized);
+        return () => window.removeEventListener('auth:unauthorized', handleUnauthorized);
+      }, []);
+
+      const login = async (creds) => {
+        const res = await authApi.login(creds);
+        setToken(res.token);
+        setAuthToken(res.token);
+        const userObj = {
+          id: res.id,
+          email: res.email,
+          firstName: res.firstName,
+          lastName: res.lastName,
+          roles: res.roles,
+          accountStatus: res.accountStatus
+        };
+        setUser(userObj);
+        setStoredUser(userObj);
+        return userObj;
+      };
+
+      const register = async (userData) => {
+        return await authApi.register(userData);
+      };
+
+      const logout = async () => {
+        try {
+          if (token) await authApi.logout();
+        } catch (e) {}
+        setUser(null);
+        setToken(null);
+        removeAuth();
+      };
+
+      const hasRole = (role) => {
+        if (!user || !user.roles) return false;
+        const formatted = role.startsWith('ROLE_') ? role : `ROLE_${role}`;
+        return user.roles.includes(formatted);
+      };
+
+      const getPrimaryRole = () => {
+        if (!user || !user.roles || user.roles.length === 0) return null;
+        if (user.roles.includes('ROLE_ADMIN')) return 'ADMIN';
+        if (user.roles.includes('ROLE_UNDERWRITER')) return 'UNDERWRITER';
+        return 'BORROWER';
+      };
+
+      const getDashboardRoute = () => {
+        const r = getPrimaryRole();
+        if (r === 'ADMIN') return '/dashboard/admin';
+        if (r === 'UNDERWRITER') return '/dashboard/underwriter';
+        return '/dashboard/borrower';
+      };
+
+      return (
+        <AuthContext.Provider value={{
+          user, token, login, register, logout, hasRole, getPrimaryRole, getDashboardRoute,
+          isAuthenticated: !!token && !!user
+        }}>
+          {children}
+        </AuthContext.Provider>
+      );
+    }
+
+    const useAuth = () => useContext(AuthContext);
+
+    function Navbar({ currentPath, onNavigate }) {
+      const { user, isAuthenticated, logout, getPrimaryRole, getDashboardRoute } = useAuth();
+      const role = getPrimaryRole();
+
+      const getRoleBadge = () => {
+        switch (role) {
+          case 'ADMIN': return 'bg-purple-100 text-purple-800 border-purple-200';
+          case 'UNDERWRITER': return 'bg-blue-100 text-blue-800 border-blue-200';
+          case 'BORROWER': return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+          default: return 'bg-gray-100 text-gray-800 border-gray-200';
+        }
+      };
+
+      return (
+        <nav className="bg-slate-900 border-b border-slate-800 sticky top-0 z-50 text-white">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex justify-between h-16">
+              <div className="flex items-center space-x-3 cursor-pointer" onClick={() => onNavigate(isAuthenticated ? getDashboardRoute() : '/login')}>
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center font-bold text-xl text-slate-950 shadow-lg shadow-emerald-500/20">
+                  U
+                </div>
+                <div>
+                  <span className="text-xl font-bold bg-gradient-to-r from-white to-slate-300 bg-clip-text text-transparent">
+                    Utang na Loob
+                  </span>
+                  <span className="hidden sm:inline-block ml-2 text-xs uppercase px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
+                    Micro-Lending
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-4">
+                {isAuthenticated ? (
+                  <>
+                    <div className="flex items-center space-x-3 border-r border-slate-800 pr-4">
+                      <div className="text-right hidden sm:block">
+                        <div className="text-sm font-semibold text-slate-200">{user?.firstName} {user?.lastName}</div>
+                        <div className="text-xs text-slate-400">{user?.email}</div>
+                      </div>
+                      <span className={`text-xs px-2.5 py-1 rounded-full font-semibold border ${getRoleBadge()}`}>
+                        {role}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => onNavigate(getDashboardRoute())}
+                      className="px-3 py-1.5 rounded-lg text-sm font-medium bg-emerald-500 text-slate-950 font-semibold"
+                    >
+                      Dashboard
+                    </button>
+                    <button
+                      onClick={async () => { await logout(); onNavigate('/login'); }}
+                      className="px-3 py-1.5 rounded-lg text-sm font-medium text-rose-300 hover:bg-rose-950/40 border border-rose-800/40 transition"
+                    >
+                      Logout
+                    </button>
+                  </>
+                ) : (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => onNavigate('/login')}
+                      className={`px-3.5 py-1.5 rounded-lg text-sm font-medium ${currentPath === '/login' ? 'bg-emerald-500 text-slate-950 font-semibold' : 'text-slate-300 hover:bg-slate-800'}`}
+                    >
+                      Sign In
+                    </button>
+                    <button
+                      onClick={() => onNavigate('/register')}
+                      className="px-3.5 py-1.5 rounded-lg text-sm font-medium bg-emerald-600 hover:bg-emerald-500 text-white"
+                    >
+                      Register
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </nav>
+      );
+    }
+
+    // Login View
+    function LoginView({ onNavigate }) {
+      const { login } = useAuth();
+      const [formData, setFormData] = useState({ email: '', password: '' });
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+        try {
+          const u = await login(formData);
+          if (u.roles?.includes('ROLE_ADMIN')) onNavigate('/dashboard/admin');
+          else if (u.roles?.includes('ROLE_UNDERWRITER')) onNavigate('/dashboard/underwriter');
+          else onNavigate('/dashboard/borrower');
+        } catch (err) {
+          setError(err.message || 'Invalid email or password.');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const handleQuickFill = (email, password) => {
+        setFormData({ email, password });
+        setError('');
+      };
+
+      return (
+        <div className="min-h-[85vh] flex items-center justify-center py-12 px-4">
+          <div className="max-w-md w-full space-y-8 bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-2xl">
+            <div className="text-center">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center font-black text-2xl text-slate-950 mb-3 shadow-lg shadow-emerald-500/20">
+                U
+              </div>
+              <h2 className="text-3xl font-extrabold text-white">Sign In to Portal</h2>
+              <p className="mt-2 text-sm text-slate-400">Utang na Loob Automated Micro-Lending Platform</p>
+            </div>
+
+            {error && (
+              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">
+                {error}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Email Address</label>
+                <input
+                  type="email"
+                  required
+                  value={formData.email}
+                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                  placeholder="user@utangnaloob.ph"
+                  className="w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Password</label>
+                <input
+                  type="password"
+                  required
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  placeholder="••••••••"
+                  className="w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-3.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold rounded-xl shadow-lg transition"
+              >
+                {loading ? 'Authenticating...' : 'Sign In'}
+              </button>
+            </form>
+
+            <div className="pt-4 border-t border-slate-800">
+              <p className="text-xs font-semibold text-slate-400 text-center uppercase mb-3">One-Click Demo Credentials</p>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleQuickFill('borrower@utangnaloob.ph', 'Borrower@123')}
+                  className="px-2 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded-lg text-xs font-medium border border-slate-700 text-center"
+                >
+                  Borrower
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickFill('underwriter@utangnaloob.ph', 'Underwriter@123')}
+                  className="px-2 py-2 bg-slate-800 hover:bg-slate-700 text-blue-300 rounded-lg text-xs font-medium border border-slate-700 text-center"
+                >
+                  Underwriter
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickFill('admin@utangnaloob.ph', 'Admin@123')}
+                  className="px-2 py-2 bg-slate-800 hover:bg-slate-700 text-purple-300 rounded-lg text-xs font-medium border border-slate-700 text-center"
+                >
+                  Admin
+                </button>
+              </div>
+            </div>
+
+            <div className="text-center pt-2">
+              <p className="text-sm text-slate-400">
+                Don't have an account?{' '}
+                <button onClick={() => onNavigate('/register')} className="text-emerald-400 font-semibold hover:underline">
+                  Register as Borrower
+                </button>
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Register View (Exclusively for Borrowers - Underwriter/Admin options removed)
+    function RegisterView({ onNavigate }) {
+      const { register } = useAuth();
+      const [formData, setFormData] = useState({
+        firstName: '', lastName: '', email: '', password: '', confirmPassword: '',
+        phoneNumber: '', dateOfBirth: '1995-05-15', address: '',
+        employmentStatus: 'EMPLOYED', monthlyIncome: 35000
+      });
+      const [error, setError] = useState('');
+      const [success, setSuccess] = useState('');
+      const [loading, setLoading] = useState(false);
+
+      const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        if (formData.password !== formData.confirmPassword) {
+          setError('Passwords do not match');
+          return;
+        }
+        if (formData.password.length < 6) {
+          setError('Password must be at least 6 characters');
+          return;
+        }
+
+        setLoading(true);
+        try {
+          const payload = {
+            firstName: formData.firstName.trim(),
+            lastName: formData.lastName.trim(),
+            email: formData.email.trim().toLowerCase(),
+            password: formData.password,
+            phoneNumber: formData.phoneNumber.trim(),
+            dateOfBirth: formData.dateOfBirth,
+            address: formData.address.trim(),
+            employmentStatus: formData.employmentStatus,
+            monthlyIncome: parseFloat(formData.monthlyIncome) || 0
+          };
+          const res = await register(payload);
+          setSuccess(res.message || 'Borrower account registered successfully! Redirecting...');
+          setTimeout(() => onNavigate('/login'), 1500);
+        } catch (err) {
+          setError(err.message || 'Registration failed.');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="min-h-[85vh] flex items-center justify-center py-10 px-4">
+          <div className="max-w-2xl w-full bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-2xl">
+            <div className="text-center mb-6">
+              <h2 className="text-3xl font-extrabold text-white">Create Borrower Account</h2>
+              <p className="mt-1 text-sm text-slate-400">Join Utang na Loob Transparent Lending Platform</p>
+            </div>
+
+            {error && <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">{error}</div>}
+            {success && <div className="mb-4 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm">{success}</div>}
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">First Name *</label>
+                  <input
+                    type="text" required value={formData.firstName}
+                    onChange={(e) => setFormData({ ...formData, firstName: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Last Name *</label>
+                  <input
+                    type="text" required value={formData.lastName}
+                    onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Email *</label>
+                  <input
+                    type="email" required value={formData.email}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Mobile Phone Number *</label>
+                  <input
+                    type="text" required value={formData.phoneNumber}
+                    onChange={(e) => setFormData({ ...formData, phoneNumber: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Password *</label>
+                  <input
+                    type="password" required value={formData.password}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Confirm Password *</label>
+                  <input
+                    type="password" required value={formData.confirmPassword}
+                    onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Employment Status *</label>
+                  <select
+                    value={formData.employmentStatus}
+                    onChange={(e) => setFormData({ ...formData, employmentStatus: e.target.value })}
+                    className="w-full px-3 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  >
+                    <option value="EMPLOYED">Employed (Private/Govt)</option>
+                    <option value="SELF_EMPLOYED">Self-Employed / Business Owner</option>
+                    <option value="FREELANCER">Freelancer / Gig Economy</option>
+                    <option value="OFW">OFW / Remittance Dependent</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Monthly Income (₱) *</label>
+                  <input
+                    type="number" required min="1000" step="500" value={formData.monthlyIncome}
+                    onChange={(e) => setFormData({ ...formData, monthlyIncome: e.target.value })}
+                    className="w-full px-3 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Complete Residential Address *</label>
+                <input
+                  type="text" required value={formData.address}
+                  onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                  placeholder="Street, Barangay, City, Province"
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                />
+              </div>
+
+              <button
+                type="submit" disabled={loading}
+                className="w-full py-3.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 text-slate-950 font-bold rounded-xl shadow-lg transition"
+              >
+                {loading ? 'Creating...' : 'Register as Borrower'}
+              </button>
+            </form>
+
+            <div className="text-center pt-4 border-t border-slate-800 mt-6">
+              <p className="text-sm text-slate-400">
+                Already registered? <button onClick={() => onNavigate('/login')} className="text-emerald-400 font-semibold hover:underline">Sign In here</button>
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Borrower Dashboard View (with Lending Requests & Digital Repayments)
+    function BorrowerDashboardView() {
+      const { user } = useAuth();
+      const [profile, setProfile] = useState(null);
+      const [loans, setLoans] = useState([]);
+      const [payments, setPayments] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [actionMsg, setActionMsg] = useState(null);
+
+      // KYC Modal
+      const [showKycModal, setShowKycModal] = useState(false);
+      const [kycForm, setKycForm] = useState({
+        idType: 'UMID',
+        idNumber: '',
+        idDocumentUrl: 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?auto=format&fit=crop&w=600&q=80',
+        proofOfIncomeType: 'PAYSLIP',
+        proofOfIncomeUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=600&q=80',
+        monthlyIncome: 35000
+      });
+
+      // Loan Modal
+      const [showLoanModal, setShowLoanModal] = useState(false);
+      const [loanForm, setLoanForm] = useState({
+        amount: 5000,
+        installmentTermMonths: 3,
+        repaymentFrequency: 'MONTHLY',
+        loanPurpose: 'Personal / Emergency Cash Advance'
+      });
+      const [submittingLoan, setSubmittingLoan] = useState(false);
+
+      // Repayment Modal
+      const [selectedInstallment, setSelectedInstallment] = useState(null);
+      const [selectedLoan, setSelectedLoan] = useState(null);
+      const [payMethod, setPayMethod] = useState('GCASH');
+      const [submittingPay, setSubmittingPay] = useState(false);
+
+      const loadData = async () => {
+        try {
+          const [prof, userLoans, userPayments] = await Promise.all([
+            borrowerApi.getDashboard(),
+            borrowerApi.getMyLoans().catch(() => []),
+            borrowerApi.getPaymentHistory().catch(() => [])
+          ]);
+          setProfile(prof);
+          setLoans(userLoans);
+          setPayments(userPayments);
+          if (prof.monthlyIncome) {
+            setKycForm(prev => ({ ...prev, monthlyIncome: prof.monthlyIncome }));
+          }
+        } catch (err) {
+          console.error(err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      useEffect(() => { loadData(); }, []);
+
+      const handleKycSubmit = async (e) => {
+        e.preventDefault();
+        setActionMsg(null);
+        try {
+          const res = await borrowerApi.submitKyc(kycForm);
+          setActionMsg({ type: 'success', text: res.message });
+          setShowKycModal(false);
+          await loadData();
+        } catch (err) {
+          setActionMsg({ type: 'error', text: err.message });
+        }
+      };
+
+      const handleLoanSubmit = async (e) => {
+        e.preventDefault();
+        setSubmittingLoan(true);
+        setActionMsg(null);
+        try {
+          const res = await borrowerApi.requestLoan(loanForm);
+          setActionMsg({
+            type: 'success',
+            text: `Disbursement of ₱${res.principalAmount?.toLocaleString()} approved! Amortization schedule generated across ${res.installments?.length} installments.`
+          });
+          setShowLoanModal(false);
+          await loadData();
+        } catch (err) {
+          setActionMsg({ type: 'error', text: err.message });
+        } finally {
+          setSubmittingLoan(false);
+        }
+      };
+
+      const handlePayInstallment = async (e) => {
+        e.preventDefault();
+        if (!selectedLoan || !selectedInstallment) return;
+        setSubmittingPay(true);
+        setActionMsg(null);
+        try {
+          const res = await borrowerApi.payInstallment({
+            loanId: selectedLoan.id,
+            installmentId: selectedInstallment.id,
+            amount: selectedInstallment.totalDue,
+            paymentMethod: payMethod
+          });
+          setSelectedInstallment(null);
+          setSelectedLoan(null);
+          setActionMsg({
+            type: 'success',
+            text: `Payment of ₱${res.amountPaid?.toLocaleString()} via ${res.paymentMethod} verified! Ref: ${res.transactionReference}. Available revolving credit limit instantly replenished!`
+          });
+          await loadData();
+        } catch (err) {
+          setActionMsg({ type: 'error', text: err.message });
+        } finally {
+          setSubmittingPay(false);
+        }
+      };
+
+      const approvedLimit = profile?.approvedCreditLimit || 0;
+      const availableBalance = profile?.availableBalance || 0;
+      const drawnBalance = profile?.drawnBalance || 0;
+      const kycStatus = profile?.kycStatus || 'NOT_SUBMITTED';
+      const isKycVerified = kycStatus === 'VERIFIED';
+
+      const reqAmount = Number(loanForm.amount) || 1000;
+      const reqTerm = Number(loanForm.installmentTermMonths) || 3;
+      const reqFreq = loanForm.repaymentFrequency;
+      const reqInterest = reqAmount * 0.02 * reqTerm;
+      const reqFee = Math.max(150, reqAmount * 0.015);
+      const reqTotal = reqAmount + reqInterest + reqFee;
+      const reqCount = reqFreq === 'BI_WEEKLY' ? reqTerm * 2 : reqTerm;
+
+      if (loading) return <div className="p-12 text-center text-slate-400">Loading Borrower Dashboard...</div>;
+
+      return (
+        <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white">
+                Kumusta, {profile?.firstName || user?.firstName}!
+              </h1>
+              <p className="text-slate-400 text-sm">Borrower Revolving Credit & Installment Schedule Portal</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              {!isKycVerified ? (
+                <button
+                  onClick={() => setShowKycModal(true)}
+                  className="px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold rounded-xl text-sm"
+                >
+                  {kycStatus === 'PENDING' ? 'Update KYC' : 'Submit KYC Documents'}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowLoanModal(true)}
+                  disabled={availableBalance < 1000}
+                  className="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 text-slate-950 font-bold rounded-xl text-sm shadow-lg disabled:opacity-50"
+                >
+                  + Request Cash Loan Advance
+                </button>
+              )}
+            </div>
+          </div>
+
+          {actionMsg && (
+            <div className={`p-4 rounded-xl text-sm flex items-center space-x-2 ${actionMsg.type === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'}`}>
+              <span className="font-bold">{actionMsg.type === 'success' ? '✓' : '!'}</span>
+              <span>{actionMsg.text}</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+              <span className="text-xs uppercase text-slate-400 font-semibold block mb-1">Approved Credit Limit</span>
+              <span className="text-3xl font-black text-white">₱ {approvedLimit.toLocaleString()}</span>
+            </div>
+            <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-6">
+              <span className="text-xs uppercase text-emerald-400 font-semibold block mb-1">Available Spending Balance</span>
+              <span className="text-3xl font-black text-emerald-400">₱ {availableBalance.toLocaleString()}</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+              <span className="text-xs uppercase text-slate-400 font-semibold block mb-1">Outstanding Drawn Balance</span>
+              <span className="text-3xl font-black text-amber-400">₱ {drawnBalance.toLocaleString()}</span>
+            </div>
+          </div>
+
+          {/* Active Loans & Amortization Schedules */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h2 className="text-lg font-bold text-white">My Active Loan Disbursements & Amortization</h2>
+                <p className="text-xs text-slate-400">Track binding installment schedules and settle dues online</p>
+              </div>
+              {isKycVerified && (
+                <button
+                  onClick={() => setShowLoanModal(true)}
+                  disabled={availableBalance < 1000}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold disabled:opacity-50"
+                >
+                  + Draw Cash Advance
+                </button>
+              )}
+            </div>
+
+            {loans.length === 0 ? (
+              <div className="py-8 text-center border border-dashed border-slate-800 rounded-xl">
+                <p className="text-slate-400 text-sm">No cash loans drawn yet.</p>
+                {isKycVerified ? (
+                  <button onClick={() => setShowLoanModal(true)} className="mt-2 px-3 py-1.5 bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs">
+                    Request First Cash Disbursement
+                  </button>
+                ) : (
+                  <p className="text-xs text-amber-400 mt-1">Complete KYC verification above to unlock cash disbursements.</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {loans.map(loan => (
+                  <div key={loan.id} className="bg-slate-950 border border-slate-800 rounded-xl p-4">
+                    <div className="flex justify-between items-center pb-3 border-b border-slate-800 mb-3">
+                      <div>
+                        <span className="text-xs font-bold text-emerald-400 uppercase">Loan #{loan.id} • {loan.loanPurpose}</span>
+                        <div className="text-xs text-slate-300">Principal: ₱{loan.principalAmount?.toLocaleString()} • Total Repayment: ₱{loan.totalRepaymentAmount?.toLocaleString()}</div>
+                      </div>
+                      <div className="text-right">
+                        <span className={`text-xs px-2 py-0.5 rounded font-bold ${loan.status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{loan.status}</span>
+                        <div className="text-xs text-slate-400 mt-0.5">Remaining: ₱{loan.outstandingBalance?.toLocaleString()}</div>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs text-slate-300">
+                        <thead className="bg-slate-900 text-slate-400 uppercase">
+                          <tr>
+                            <th className="p-2">#</th>
+                            <th className="p-2">Due Date</th>
+                            <th className="p-2">Principal</th>
+                            <th className="p-2">Interest</th>
+                            <th className="p-2">Total Due</th>
+                            <th className="p-2">Status</th>
+                            <th className="p-2 text-right">Repayment</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800">
+                          {loan.installments?.map(inst => (
+                            <tr key={inst.id} className="hover:bg-slate-900/40">
+                              <td className="p-2 font-bold">{inst.installmentNumber}</td>
+                              <td className="p-2">{inst.dueDate}</td>
+                              <td className="p-2">₱{inst.principalDue?.toLocaleString()}</td>
+                              <td className="p-2">₱{inst.interestDue?.toLocaleString()}</td>
+                              <td className="p-2 font-bold text-white">₱{inst.totalDue?.toLocaleString()}</td>
+                              <td className="p-2"><span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${inst.status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{inst.status}</span></td>
+                              <td className="p-2 text-right">
+                                {inst.status !== 'PAID' ? (
+                                  <button
+                                    onClick={() => { setSelectedLoan(loan); setSelectedInstallment(inst); }}
+                                    className="px-2.5 py-1 bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold rounded text-xs"
+                                  >
+                                    Pay Online
+                                  </button>
+                                ) : (
+                                  <span className="text-slate-500 text-[11px]">Paid</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Payment Ledger */}
+          {payments.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+              <h2 className="text-lg font-bold text-white mb-4">Repayment History & Settlement Ledger</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-950 text-slate-400 uppercase">
+                    <tr>
+                      <th className="p-2.5">Date</th>
+                      <th className="p-2.5">Reference Number</th>
+                      <th className="p-2.5">Payment Method</th>
+                      <th className="p-2.5">Amount Settled</th>
+                      <th className="p-2.5">Revolving Impact</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {payments.map(p => (
+                      <tr key={p.id}>
+                        <td className="p-2.5">{new Date(p.paidAt).toLocaleDateString()}</td>
+                        <td className="p-2.5 font-mono text-emerald-400">{p.transactionReference}</td>
+                        <td className="p-2.5 font-semibold">{p.paymentMethod}</td>
+                        <td className="p-2.5 font-bold text-white">₱{p.amount?.toLocaleString()}</td>
+                        <td className="p-2.5 text-emerald-400 font-medium">+₱{p.amount?.toLocaleString()} Limit Restored</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Loan Request Modal */}
+          {showLoanModal && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-bold text-white">Request Cash Advance</h3>
+                  <button onClick={() => setShowLoanModal(false)} className="text-slate-400 hover:text-white font-bold">✕</button>
+                </div>
+
+                <form onSubmit={handleLoanSubmit} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Disbursement Amount (₱) *</label>
+                    <input
+                      type="number" required min="1000" max={availableBalance} step="500" value={loanForm.amount}
+                      onChange={(e) => setLoanForm({ ...loanForm, amount: parseFloat(e.target.value) || 0 })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                    />
+                    <span className="text-xs text-slate-400 mt-1 block">Available Limit: ₱{availableBalance.toLocaleString()}</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Duration</label>
+                      <select
+                        value={loanForm.installmentTermMonths}
+                        onChange={(e) => setLoanForm({ ...loanForm, installmentTermMonths: Number(e.target.value) })}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                      >
+                        <option value={1}>1 Month</option>
+                        <option value={2}>2 Months</option>
+                        <option value={3}>3 Months</option>
+                        <option value={6}>6 Months</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Frequency</label>
+                      <select
+                        value={loanForm.repaymentFrequency}
+                        onChange={(e) => setLoanForm({ ...loanForm, repaymentFrequency: e.target.value })}
+                        className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                      >
+                        <option value="BI_WEEKLY">Bi-Weekly (15 days)</option>
+                        <option value="MONTHLY">Monthly</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Loan Purpose</label>
+                    <input
+                      type="text" value={loanForm.loanPurpose}
+                      onChange={(e) => setLoanForm({ ...loanForm, loanPurpose: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                    />
+                  </div>
+
+                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1 text-xs">
+                    <div className="flex justify-between text-slate-400"><span>Interest (2% / mo):</span><span>₱{reqInterest.toFixed(2)}</span></div>
+                    <div className="flex justify-between text-slate-400"><span>Processing Fee:</span><span>₱{reqFee.toFixed(2)}</span></div>
+                    <div className="flex justify-between font-bold text-white pt-1 border-t border-slate-800"><span>Total Repayment:</span><span className="text-emerald-400">₱{reqTotal.toFixed(2)}</span></div>
+                    <div className="flex justify-between font-bold text-emerald-400"><span>Due per Installment ({reqCount}x):</span><span>₱{(reqTotal / reqCount).toFixed(2)}</span></div>
+                  </div>
+
+                  <div className="flex justify-end space-x-2 pt-2">
+                    <button type="button" onClick={() => setShowLoanModal(false)} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs">Cancel</button>
+                    <button type="submit" disabled={submittingLoan || reqAmount > availableBalance || reqAmount < 1000} className="px-4 py-2 bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs shadow">
+                      {submittingLoan ? 'Processing...' : 'Confirm Loan Disbursement'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Repayment Modal */}
+          {selectedInstallment && selectedLoan && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 shadow-2xl">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-bold text-white">Online Digital Repayment</h3>
+                  <button onClick={() => { setSelectedInstallment(null); setSelectedLoan(null); }} className="text-slate-400 hover:text-white font-bold">✕</button>
+                </div>
+                <p className="text-xs text-slate-400 mb-3">Installment #{selectedInstallment.installmentNumber} • Loan #{selectedLoan.id}</p>
+
+                <form onSubmit={handlePayInstallment} className="space-y-4">
+                  <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-center">
+                    <span className="text-xs text-slate-400 block mb-1">Total Due</span>
+                    <span className="text-2xl font-black text-emerald-400">₱{selectedInstallment.totalDue?.toFixed(2)}</span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    {['GCASH', 'MAYA', 'BANK_CARD'].map(m => (
+                      <button
+                        key={m} type="button" onClick={() => setPayMethod(m)}
+                        className={`p-2 rounded-lg border text-xs font-bold ${payMethod === m ? 'bg-emerald-500/10 border-emerald-500 text-emerald-400' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                      >
+                        {m === 'GCASH' ? 'GCash' : m === 'MAYA' ? 'Maya' : 'Card'}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button type="submit" disabled={submittingPay} className="w-full py-3 bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold rounded-xl text-xs shadow">
+                    {submittingPay ? 'Processing...' : `Confirm Payment of ₱${selectedInstallment.totalDue?.toFixed(2)}`}
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* KYC Modal */}
+          {showKycModal && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-bold text-white">Submit KYC Verification Documents</h3>
+                  <button onClick={() => setShowKycModal(false)} className="text-slate-400 hover:text-white font-bold">✕</button>
+                </div>
+
+                <form onSubmit={handleKycSubmit} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">ID Type *</label>
+                    <select
+                      value={kycForm.idType} onChange={(e) => setKycForm({ ...kycForm, idType: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                    >
+                      <option value="UMID">Unified Multi-Purpose ID (UMID)</option>
+                      <option value="SSS">Social Security System (SSS)</option>
+                      <option value="DRIVERS_LICENSE">Driver's License (LTO)</option>
+                      <option value="PASSPORT">Passport (DFA)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">ID Number *</label>
+                    <input
+                      type="text" required value={kycForm.idNumber} onChange={(e) => setKycForm({ ...kycForm, idNumber: e.target.value })}
+                      placeholder="e.g. CRN-0111-2345678-9"
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Proof of Income Type *</label>
+                    <select
+                      value={kycForm.proofOfIncomeType} onChange={(e) => setKycForm({ ...kycForm, proofOfIncomeType: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                    >
+                      <option value="PAYSLIP">Latest 3 Months Payslip</option>
+                      <option value="CERTIFICATE_OF_EMPLOYMENT">Certificate of Employment (COE)</option>
+                      <option value="ITR">Income Tax Return (BIR Form 2316)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Declared Monthly Income (₱) *</label>
+                    <input
+                      type="number" required min="1000" step="500" value={kycForm.monthlyIncome}
+                      onChange={(e) => setKycForm({ ...kycForm, monthlyIncome: parseFloat(e.target.value) || 0 })}
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm"
+                    />
+                  </div>
+                  <div className="flex justify-end space-x-2 pt-2">
+                    <button type="button" onClick={() => setShowKycModal(false)} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs">Cancel</button>
+                    <button type="submit" className="px-4 py-2 bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs shadow">Submit to Underwriter</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Underwriter Dashboard View
+    function UnderwriterDashboardView() {
+      const [queue, setQueue] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [msg, setMsg] = useState(null);
+      const [rejectTarget, setRejectTarget] = useState(null);
+      const [rejectReason, setRejectReason] = useState('');
+      const [submittingReject, setSubmittingReject] = useState(false);
+
+      const loadQueue = async () => {
+        try {
+          const d = await underwriterApi.getQueue();
+          setQueue(d);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      useEffect(() => { loadQueue(); }, []);
+
+      const handleApprove = async (applicant) => {
+        setMsg(null);
+        try {
+          const recLimit = Math.min(Math.round((applicant.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
+          const res = await underwriterApi.reviewApplicant(applicant.id, {
+            decision: 'VERIFIED',
+            verifiedMonthlyIncome: applicant.monthlyIncome,
+            approvedCreditLimit: recLimit,
+            notesOrRejectionReason: 'Approved by Underwriter — 40% income-based revolving limit assigned.'
+          });
+          setMsg({ type: 'success', text: `✓ ${res.message || 'Application approved. Credit limit of ₱' + recLimit.toLocaleString() + ' assigned.'}` });
+          loadQueue();
+        } catch (e) {
+          setMsg({ type: 'error', text: e.message });
+        }
+      };
+
+      const handleRejectSubmit = async (e) => {
+        e.preventDefault();
+        if (!rejectTarget || !rejectReason.trim()) return;
+        setSubmittingReject(true);
+        setMsg(null);
+        try {
+          const res = await underwriterApi.reviewApplicant(rejectTarget.id, {
+            decision: 'REJECTED',
+            verifiedMonthlyIncome: rejectTarget.monthlyIncome,
+            approvedCreditLimit: 0,
+            notesOrRejectionReason: rejectReason.trim()
+          });
+          setMsg({ type: 'error', text: `✗ Application rejected: ${rejectReason}` });
+          setRejectTarget(null);
+          setRejectReason('');
+          loadQueue();
+        } catch (e) {
+          setMsg({ type: 'error', text: e.message });
+        } finally {
+          setSubmittingReject(false);
+        }
+      };
+
+      return (
+        <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 flex justify-between items-center shadow-xl">
+            <div>
+              <h1 className="text-2xl font-extrabold text-white">Underwriting & Credit Risk Console</h1>
+              <p className="text-slate-400 text-sm">Review borrower KYC documentation and approve or reject credit applications</p>
+            </div>
+            <div className="px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-center">
+              <span className="text-xs text-slate-400 block uppercase">Queue Count</span>
+              <span className="text-xl font-bold text-amber-400">{queue.length}</span>
+            </div>
+          </div>
+
+          {msg && (
+            <div className={`p-4 rounded-xl text-sm font-medium ${msg.type === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'}`}>
+              {msg.text}
+            </div>
+          )}
+
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-white mb-1">Pending KYC Applications</h2>
+            <p className="text-xs text-slate-400 mb-4">Approve with algorithmically recommended limit or reject with documented reason</p>
+            {loading ? <div className="py-8 text-center text-slate-400">Loading queue...</div> : queue.length === 0 ? (
+              <div className="py-8 text-center border border-dashed border-slate-800 rounded-xl text-slate-400">
+                <div className="text-2xl mb-2">✓</div>
+                <div>No pending KYC submissions. All applications reviewed.</div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm text-slate-300">
+                  <thead className="bg-slate-950 text-xs uppercase text-slate-400">
+                    <tr>
+                      <th className="p-3">Applicant</th>
+                      <th className="p-3">Monthly Income</th>
+                      <th className="p-3">Gov't ID</th>
+                      <th className="p-3">ID Number</th>
+                      <th className="p-3">Rec. Limit (40%)</th>
+                      <th className="p-3 text-right">Decision</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {queue.map(a => {
+                      const recLimit = Math.min(Math.round((a.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
+                      return (
+                        <tr key={a.id} className="hover:bg-slate-800/40">
+                          <td className="p-3 font-semibold text-white">{a.firstName} {a.lastName} <div className="text-xs font-normal text-slate-400">{a.email}</div></td>
+                          <td className="p-3 text-emerald-400 font-bold">₱ {(a.monthlyIncome || 0).toLocaleString()}</td>
+                          <td className="p-3 text-slate-200">{a.idType || '—'}</td>
+                          <td className="p-3 font-mono text-xs text-slate-300">{a.idNumber || '—'}</td>
+                          <td className="p-3 font-bold text-white">₱ {recLimit.toLocaleString()}</td>
+                          <td className="p-3 text-right space-x-2">
+                            <button
+                              onClick={() => handleApprove(a)}
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold"
+                            >
+                              ✓ Approve
+                            </button>
+                            <button
+                              onClick={() => { setRejectTarget(a); setRejectReason(''); setMsg(null); }}
+                              className="px-3 py-1.5 bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-700/40 rounded-lg text-xs font-bold"
+                            >
+                              ✗ Reject
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Reject Reason Modal */}
+          {rejectTarget && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-slate-900 border border-rose-800/50 rounded-3xl max-w-md w-full p-6 shadow-2xl">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-bold text-white">Reject KYC Application</h3>
+                  <button onClick={() => setRejectTarget(null)} className="text-slate-400 hover:text-white font-bold">✕</button>
+                </div>
+                <div className="mb-4 p-3 bg-slate-950 rounded-xl">
+                  <div className="text-sm font-semibold text-white">{rejectTarget.firstName} {rejectTarget.lastName}</div>
+                  <div className="text-xs text-slate-400">{rejectTarget.email} • Income: ₱{(rejectTarget.monthlyIncome || 0).toLocaleString()}</div>
+                </div>
+                <form onSubmit={handleRejectSubmit} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Rejection Reason *</label>
+                    <textarea
+                      required rows={3} value={rejectReason}
+                      onChange={(e) => setRejectReason(e.target.value)}
+                      placeholder="e.g. Insufficient income verification documents. Declared income does not match submitted payslip."
+                      className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm resize-none"
+                    />
+                  </div>
+                  <div className="flex justify-end space-x-2">
+                    <button type="button" onClick={() => setRejectTarget(null)} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs">Cancel</button>
+                    <button type="submit" disabled={submittingReject || !rejectReason.trim()} className="px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white font-bold rounded-lg text-xs disabled:opacity-50">
+                      {submittingReject ? 'Submitting...' : 'Confirm Rejection'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Admin Dashboard View
+    function AdminDashboardView() {
+      const [metrics, setMetrics] = useState(null);
+      const [users, setUsers] = useState([]);
+      const [params, setParams] = useState([]);
+      const [logs, setLogs] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [msg, setMsg] = useState(null);
+
+      const load = async () => {
+        try {
+          const [m, u, p, l] = await Promise.all([
+            adminApi.getMetrics(),
+            adminApi.getUsers(),
+            adminApi.getParameters(),
+            adminApi.getAuditLogs()
+          ]);
+          setMetrics(m);
+          setUsers(u);
+          setParams(p);
+          setLogs(l);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      useEffect(() => { load(); }, []);
+
+      const handleToggleStatus = async (id) => {
+        setMsg(null);
+        try {
+          await adminApi.toggleUserStatus(id);
+          setMsg({ type: 'success', text: 'User status toggled.' });
+          load();
+        } catch (e) {
+          setMsg({ type: 'error', text: e.message });
+        }
+      };
+
+      const handleRoleChange = async (id, r) => {
+        setMsg(null);
+        try {
+          await adminApi.updateUserRoles(id, [r]);
+          setMsg({ type: 'success', text: `Role updated to ${r}` });
+          load();
+        } catch (e) {
+          setMsg({ type: 'error', text: e.message });
+        }
+      };
+
+      return (
+        <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 flex justify-between items-center shadow-xl">
+            <div>
+              <h1 className="text-2xl font-extrabold text-white">System Administration Dashboard</h1>
+              <p className="text-slate-400 text-sm">Portfolio KPIs, Role-Based Access Control & Audit Log Engine</p>
+            </div>
+            <span className="text-xs px-2.5 py-1 rounded-full font-semibold border bg-purple-500/10 text-purple-400 border-purple-500/30">
+              Admin
+            </span>
+          </div>
+
+          {msg && (
+            <div className={`p-4 rounded-xl text-sm ${msg.type === 'success' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>
+              {msg.text}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block">Total Users</span>
+              <span className="text-2xl font-bold text-white">{metrics?.totalUsers || 0}</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block">Approved Credit</span>
+              <span className="text-2xl font-bold text-emerald-400">₱ {(metrics?.totalApprovedCredit || 0).toLocaleString()}</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block">Recovery Rate</span>
+              <span className="text-2xl font-bold text-emerald-400">{metrics?.repaymentRecoveryRate || 98.4}%</span>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block">NPL Ratio</span>
+              <span className="text-2xl font-bold text-rose-400">{metrics?.nonPerformingLoanRatio || 1.6}%</span>
+            </div>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-white mb-4">User Accounts & Role Permissions</h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm text-slate-300">
+                <thead className="bg-slate-950 text-xs uppercase text-slate-400">
+                  <tr>
+                    <th className="p-3">User</th>
+                    <th className="p-3">Role</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3">Change Role</th>
+                    <th className="p-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800">
+                  {users.map(u => {
+                    const r = u.roles?.includes('ROLE_ADMIN') ? 'ADMIN' : u.roles?.includes('ROLE_UNDERWRITER') ? 'UNDERWRITER' : 'BORROWER';
+                    return (
+                      <tr key={u.id} className="hover:bg-slate-800/40">
+                        <td className="p-3 font-semibold text-white">{u.firstName} {u.lastName} <div className="text-xs font-normal text-slate-400">{u.email}</div></td>
+                        <td className="p-3"><span className="text-xs px-2 py-0.5 rounded bg-slate-800 font-semibold">{r}</span></td>
+                        <td className="p-3"><span className={`text-xs px-2 py-0.5 rounded ${u.accountStatus === 'ACTIVE' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>{u.accountStatus}</span></td>
+                        <td className="p-3">
+                          <select
+                            value={r} onChange={(e) => handleRoleChange(u.id, e.target.value)}
+                            className="px-2 py-1 bg-slate-950 border border-slate-700 rounded text-xs text-white"
+                          >
+                            <option value="BORROWER">Borrower</option>
+                            <option value="UNDERWRITER">Underwriter</option>
+                            <option value="ADMIN">Admin</option>
+                          </select>
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => handleToggleStatus(u.id)}
+                            className={`px-3 py-1 rounded text-xs font-semibold ${u.accountStatus === 'ACTIVE' ? 'bg-rose-950/40 text-rose-300 border border-rose-800/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-800/40'}`}
+                          >
+                            {u.accountStatus === 'ACTIVE' ? 'Lock' : 'Activate'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Main App
+    function App() {
+      const [currentPath, setCurrentPath] = useState(() => window.location.hash.replace('#', '') || '/login');
+
+      useEffect(() => {
+        const onHash = () => setCurrentPath(window.location.hash.replace('#', '') || '/login');
+        window.addEventListener('hashchange', onHash);
+        return () => window.removeEventListener('hashchange', onHash);
+      }, []);
+
+      const navigate = (p) => {
+        window.location.hash = p;
+        setCurrentPath(p);
+      };
+
+      const renderView = () => {
+        switch (currentPath) {
+          case '/login': return <LoginView onNavigate={navigate} />;
+          case '/register': return <RegisterView onNavigate={navigate} />;
+          case '/dashboard/borrower': return <BorrowerDashboardView onNavigate={navigate} />;
+          case '/dashboard/underwriter': return <UnderwriterDashboardView onNavigate={navigate} />;
+          case '/dashboard/admin': return <AdminDashboardView onNavigate={navigate} />;
+          default: return <LoginView onNavigate={navigate} />;
+        }
+      };
+
+      return (
+        <AuthProvider>
+          <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+            <Navbar currentPath={currentPath} onNavigate={navigate} />
+            <main className="flex-1 pb-12">{renderView()}</main>
+            <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-500">
+              © 2026 Utang na Loob: Automated Micro-Lending & Transparent Repayment Tracking Platform
+            </footer>
+          </div>
+        </AuthProvider>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
