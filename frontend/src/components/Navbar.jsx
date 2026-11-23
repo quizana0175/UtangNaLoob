@@ -65,6 +65,17 @@ export default function Navbar({ currentPath, onNavigate }) {
                   </button>
 
                   <button
+                    onClick={() => onNavigate('/profile')}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
+                      currentPath === '/profile'
+                        ? 'bg-teal-500 text-slate-950 shadow-md font-semibold'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    My Profile
+                  </button>
+
+                  <button
                     onClick={handleLogout}
                     className="px-3 py-1.5 rounded-lg text-sm font-medium text-rose-300 hover:text-rose-200 hover:bg-rose-950/40 border border-rose-800/40 transition"
                   >

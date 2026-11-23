@@ -1,0 +1,24 @@
+# Maven & Java Build Output
+**/target/
+*.class
+
+# Node & Frontend Build Output
+**/node_modules/
+**/dist/
+**/build/
+.npm
+
+# IDE & Editor Settings
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log

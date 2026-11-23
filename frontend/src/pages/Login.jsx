@@ -87,9 +87,18 @@ export default function Login({ onNavigate }) {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-              Password
-            </label>
+            <div className="flex justify-between items-center mb-2">
+              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                Password
+              </label>
+              <button
+                type="button"
+                onClick={() => onNavigate('/forgot-password')}
+                className="text-xs font-medium text-emerald-400 hover:text-emerald-300 transition"
+              >
+                Forgot Password?
+              </button>
+            </div>
             <input
               name="password"
               type="password"

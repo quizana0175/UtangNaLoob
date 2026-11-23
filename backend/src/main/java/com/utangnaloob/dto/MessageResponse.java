@@ -33,4 +33,9 @@ public class MessageResponse {
     public void setSuccess(boolean success) {
         this.success = success;
     }
+
+    @Override
+    public String toString() {
+        return "MessageResponse{message='" + message + "', success=" + success + "}";
+    }
 }

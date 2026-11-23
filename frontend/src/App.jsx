@@ -4,6 +4,9 @@ import Navbar from './components/Navbar';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import Profile from './pages/Profile';
 import BorrowerDashboard from './pages/BorrowerDashboard';
 import UnderwriterDashboard from './pages/UnderwriterDashboard';
 import AdminDashboard from './pages/AdminDashboard';
@@ -39,11 +42,22 @@ function MainRouter() {
   }, [isAuthenticated]);
 
   const renderContent = () => {
-    switch (currentPath) {
+    const basePath = currentPath.split('?')[0];
+    switch (basePath) {
       case '/login':
         return <Login onNavigate={navigate} />;
       case '/register':
         return <Register onNavigate={navigate} />;
+      case '/forgot-password':
+        return <ForgotPassword onNavigate={navigate} />;
+      case '/reset-password':
+        return <ResetPassword onNavigate={navigate} />;
+      case '/profile':
+        return (
+          <ProtectedRoute onNavigate={navigate}>
+            <Profile onNavigate={navigate} />
+          </ProtectedRoute>
+        );
       case '/dashboard/borrower':
         return (
           <ProtectedRoute allowedRoles={['ROLE_BORROWER', 'ROLE_ADMIN']} onNavigate={navigate}>

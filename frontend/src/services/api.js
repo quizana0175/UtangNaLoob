@@ -80,7 +80,32 @@ export const authApi = {
   logout: () => request('/auth/logout', {
     method: 'POST'
   }),
-  getCurrentUser: () => request('/auth/me')
+  getCurrentUser: () => request('/auth/me'),
+  forgotPassword: (email) => request('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email })
+  }),
+  resetPassword: (payload) => request('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  }),
+  changePassword: (payload) => request('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })
+};
+
+// User Profile Endpoints
+export const userApi = {
+  getProfile: () => request('/users/profile'),
+  updateProfile: (data) => request('/users/profile', {
+    method: 'PUT',
+    body: JSON.stringify(data)
+  }),
+  changePassword: (data) => request('/users/change-password', {
+    method: 'POST',
+    body: JSON.stringify(data)
+  })
 };
 
 // Borrower Lending & Repayment Endpoints

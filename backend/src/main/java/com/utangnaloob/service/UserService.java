@@ -1,6 +1,7 @@
 package com.utangnaloob.service;
 
 import com.utangnaloob.dto.RoleUpdateRequest;
+import com.utangnaloob.dto.UpdateProfileRequest;
 import com.utangnaloob.dto.UserDto;
 import com.utangnaloob.dto.UserProfileResponse;
 import com.utangnaloob.entity.*;
@@ -81,6 +82,46 @@ public class UserService {
         }
 
         return response;
+    }
+
+    @Transactional
+    public UserProfileResponse updateUserProfile(String email, UpdateProfileRequest request, String ipAddress) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found: " + email));
+
+        if (request.getFirstName() != null && !request.getFirstName().trim().isEmpty()) {
+            user.setFirstName(request.getFirstName().trim());
+        }
+        if (request.getLastName() != null && !request.getLastName().trim().isEmpty()) {
+            user.setLastName(request.getLastName().trim());
+        }
+        if (request.getPhoneNumber() != null) {
+            user.setPhoneNumber(request.getPhoneNumber().trim());
+        }
+        if (request.getDateOfBirth() != null) {
+            user.setDateOfBirth(request.getDateOfBirth().trim());
+        }
+        if (request.getAddress() != null) {
+            user.setAddress(request.getAddress().trim());
+        }
+        if (request.getEmploymentStatus() != null) {
+            user.setEmploymentStatus(request.getEmploymentStatus().trim());
+        }
+        if (request.getMonthlyIncome() != null) {
+            user.setMonthlyIncome(request.getMonthlyIncome());
+        }
+
+        userRepository.save(user);
+
+        auditLogService.log(
+                "USER_PROFILE_UPDATED",
+                user.getEmail(),
+                user.getEmail(),
+                "User profile updated successfully by account owner",
+                ipAddress
+        );
+
+        return getUserProfileByEmail(email);
     }
 
     public List<UserDto> getAllUsers() {
