@@ -9,6 +9,7 @@ import com.utangnaloob.entity.KycProfile;
 import com.utangnaloob.entity.User;
 import com.utangnaloob.repository.CreditLineRepository;
 import com.utangnaloob.repository.KycProfileRepository;
+import com.utangnaloob.repository.SystemParameterRepository;
 import com.utangnaloob.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -32,7 +33,47 @@ public class KycService {
     private CreditLineRepository creditLineRepository;
 
     @Autowired
+    private SystemParameterRepository systemParameterRepository;
+
+    @Autowired
     private AuditLogService auditLogService;
+
+    @Autowired
+    private BrevoEmailService brevoEmailService;
+
+    /**
+     * SRS Appendix A: L_initial = min(L_max_tier, I_verified * DTI_max * mu_tier)
+     * rounded to the nearest PHP 500.00 (minimum PHP 2,000.00).
+     */
+    private double computeAlgorithmicLimit(double monthlyIncome, String employmentStatus) {
+        double maxInitialLimit = systemParameterRepository.findByParamKey("MAX_INITIAL_CREDIT_LIMIT")
+                .map(p -> {
+                    try { return Double.parseDouble(p.getParamValue().trim()); }
+                    catch (Exception e) { return 50000.0; }
+                })
+                .orElse(50000.0);
+
+        double dtiMax = systemParameterRepository.findByParamKey("MAX_DTI_RATIO")
+                .map(p -> {
+                    try { return Double.parseDouble(p.getParamValue().trim()); }
+                    catch (Exception e) { return 0.30; }
+                })
+                .orElse(0.30);
+
+        double muTier = 1.0;
+        if (employmentStatus != null) {
+            String emp = employmentStatus.toUpperCase();
+            if (emp.contains("GOV") || emp.contains("MULTINATIONAL")) {
+                muTier = 1.2;
+            } else if (emp.contains("SELF") || emp.contains("FREELANCE")) {
+                muTier = 0.8;
+            }
+        }
+
+        double raw = monthlyIncome * dtiMax * muTier;
+        double recommended = Math.min(Math.round(raw / 500.0) * 500.0, maxInitialLimit);
+        return Math.max(recommended, 2000.0);
+    }
 
     @Transactional
     public MessageResponse submitKyc(String email, KycSubmissionDto dto, String ipAddress) {
@@ -57,13 +98,8 @@ public class KycService {
         profile.setSubmittedAt(LocalDateTime.now());
         profile.setNotesOrRejectionReason(null);
 
-        // Algorithmic credit limit allocation calculation:
-        // Rule: 40% of declared monthly income, capped at PHP 50,000 for initial revolving credit
         double income = dto.getMonthlyIncome() != null ? dto.getMonthlyIncome() : 0.0;
-        double recommended = Math.min(Math.round(income * 0.40 / 500.0) * 500.0, 50000.0);
-        if (recommended < 2000.0) {
-            recommended = 2000.0;
-        }
+        double recommended = computeAlgorithmicLimit(income, user.getEmploymentStatus());
         profile.setRecommendedCreditLimit(recommended);
 
         kycProfileRepository.save(profile);
@@ -137,8 +173,12 @@ public class KycService {
 
             BigDecimal limitToAssign = dto.getApprovedCreditLimit();
             if (limitToAssign == null || limitToAssign.compareTo(BigDecimal.ZERO) <= 0) {
-                double rec = profile.getRecommendedCreditLimit() != null ? profile.getRecommendedCreditLimit() : 10000.0;
-                limitToAssign = BigDecimal.valueOf(rec);
+                if (dto.getVerifiedMonthlyIncome() != null && dto.getVerifiedMonthlyIncome() > 0) {
+                    limitToAssign = BigDecimal.valueOf(computeAlgorithmicLimit(dto.getVerifiedMonthlyIncome(), user.getEmploymentStatus()));
+                } else {
+                    double rec = profile.getRecommendedCreditLimit() != null ? profile.getRecommendedCreditLimit() : 10000.0;
+                    limitToAssign = BigDecimal.valueOf(rec);
+                }
             }
 
             // Update or create CreditLine
@@ -162,6 +202,8 @@ public class KycService {
                     ipAddress
             );
 
+            brevoEmailService.sendKycDecisionEmail(user.getEmail(), user.getFirstName(), true, limitToAssign, null);
+
             return new MessageResponse("Applicant KYC approved and revolving credit line of PHP " + limitToAssign + " activated successfully!", true);
 
         } else if ("REJECTED".equals(decision)) {
@@ -179,6 +221,8 @@ public class KycService {
                     "KYC rejected. Reason: " + profile.getNotesOrRejectionReason(),
                     ipAddress
             );
+
+            brevoEmailService.sendKycDecisionEmail(user.getEmail(), user.getFirstName(), false, null, profile.getNotesOrRejectionReason());
 
             return new MessageResponse("Applicant KYC marked as REJECTED.", true);
         } else {

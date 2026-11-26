@@ -3,6 +3,7 @@ package com.utangnaloob.controller;
 import com.utangnaloob.dto.*;
 import com.utangnaloob.entity.LoanDisbursement;
 import com.utangnaloob.entity.PaymentTransaction;
+import com.utangnaloob.service.DelinquencyService;
 import com.utangnaloob.service.KycService;
 import com.utangnaloob.service.LendingService;
 import com.utangnaloob.service.UserService;
@@ -15,6 +16,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @CrossOrigin(originPatterns = "*", maxAge = 3600)
 @RestController
@@ -30,6 +32,9 @@ public class BorrowerController {
 
     @Autowired
     private LendingService lendingService;
+
+    @Autowired
+    private DelinquencyService delinquencyService;
 
     @GetMapping("/dashboard")
     public ResponseEntity<UserProfileResponse> getBorrowerDashboard(Authentication authentication) {
@@ -75,5 +80,15 @@ public class BorrowerController {
     @GetMapping("/loans/payments")
     public ResponseEntity<List<PaymentTransaction>> getPaymentHistory(Authentication authentication) {
         return ResponseEntity.ok(lendingService.getPaymentHistory(authentication.getName()));
+    }
+
+    @GetMapping("/config")
+    public ResponseEntity<Map<String, Object>> getLoanConfig() {
+        return ResponseEntity.ok(lendingService.getLoanConfig());
+    }
+
+    @GetMapping("/alerts")
+    public ResponseEntity<List<Map<String, Object>>> getBillingAlerts(Authentication authentication) {
+        return ResponseEntity.ok(delinquencyService.getBorrowerBillingAlerts(authentication.getName()));
     }
 }

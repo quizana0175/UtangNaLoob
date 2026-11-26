@@ -65,6 +65,9 @@ public class AuthService {
     @Autowired
     private AuditLogService auditLogService;
 
+    @Autowired
+    private BrevoEmailService brevoEmailService;
+
     @Transactional
     public ResponseEntity<?> registerUser(RegisterRequest registerRequest, String ipAddress) {
         if (userRepository.existsByEmail(registerRequest.getEmail())) {
@@ -183,19 +186,39 @@ public class AuthService {
         PasswordResetToken resetToken = new PasswordResetToken(token, user, expiryMinutes);
         passwordResetTokenRepository.save(resetToken);
 
+        boolean emailSent = brevoEmailService.sendPasswordResetEmail(
+                user.getEmail(),
+                user.getFirstName(),
+                token,
+                expiryMinutes
+        );
+
         auditLogService.log(
-                "PASSWORD_RESET_REQUESTED",
+                emailSent ? "PASSWORD_RESET_EMAIL_SENT" : "PASSWORD_RESET_REQUESTED",
                 user.getEmail(),
                 user.getEmail(),
-                "Password reset token generated (valid for " + expiryMinutes + " minutes)",
+                emailSent
+                        ? "Password reset email dispatched via Brevo (valid for " + expiryMinutes + " minutes)"
+                        : "Password reset token generated (Brevo not configured/unavailable; valid for " + expiryMinutes + " minutes)",
                 ipAddress
         );
 
+        if (emailSent) {
+            return ResponseEntity.ok(new ForgotPasswordResponse(
+                    true,
+                    "A password reset link has been sent to " + user.getEmail() + ". Please check your inbox (and spam folder).",
+                    null,
+                    expiryMinutes,
+                    true
+            ));
+        }
+
         return ResponseEntity.ok(new ForgotPasswordResponse(
                 true,
-                "A password reset token has been generated successfully. For development and evaluation, use the token provided below or proceed with the reset link.",
+                "A password reset token has been generated. (Configure BREVO_API_KEY and BREVO_SENDER_EMAIL to send via Brevo email; using local fallback token below.)",
                 token,
-                expiryMinutes
+                expiryMinutes,
+                false
         ));
     }
 

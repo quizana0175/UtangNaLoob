@@ -37,6 +37,9 @@ public class AmortizationSchedule {
     @Column(name = "amount_paid", precision = 12, scale = 2)
     private BigDecimal amountPaid = BigDecimal.ZERO;
 
+    @Column(name = "penalty_fee", precision = 12, scale = 2)
+    private BigDecimal penaltyFee = BigDecimal.ZERO;
+
     @Column(length = 30, nullable = false)
     private String status = "PENDING"; // PENDING, PAID, OVERDUE
 
@@ -108,6 +111,14 @@ public class AmortizationSchedule {
 
     public void setAmountPaid(BigDecimal amountPaid) {
         this.amountPaid = amountPaid;
+    }
+
+    public BigDecimal getPenaltyFee() {
+        return penaltyFee != null ? penaltyFee : BigDecimal.ZERO;
+    }
+
+    public void setPenaltyFee(BigDecimal penaltyFee) {
+        this.penaltyFee = penaltyFee;
     }
 
     public String getStatus() {

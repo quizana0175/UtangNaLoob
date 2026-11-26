@@ -32,4 +32,17 @@ public class AuditLogService {
                         log.getTimestamp()))
                 .collect(Collectors.toList());
     }
+
+    public List<AuditLogDto> getLogsByAction(String action) {
+        return auditLogRepository.findByActionOrderByTimestampDesc(action).stream()
+                .map(log -> new AuditLogDto(
+                        log.getId(),
+                        log.getAction(),
+                        log.getPerformedBy(),
+                        log.getTargetUser(),
+                        log.getDetails(),
+                        log.getIpAddress(),
+                        log.getTimestamp()))
+                .collect(Collectors.toList());
+    }
 }

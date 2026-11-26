@@ -3,15 +3,13 @@ package com.utangnaloob.service;
 import com.utangnaloob.dto.SystemParameterDto;
 import com.utangnaloob.entity.ERole;
 import com.utangnaloob.entity.SystemParameter;
-import com.utangnaloob.repository.CreditLineRepository;
-import com.utangnaloob.repository.KycProfileRepository;
-import com.utangnaloob.repository.SystemParameterRepository;
-import com.utangnaloob.repository.UserRepository;
+import com.utangnaloob.repository.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -34,6 +32,15 @@ public class AdminService {
     private SystemParameterRepository systemParameterRepository;
 
     @Autowired
+    private LoanDisbursementRepository loanDisbursementRepository;
+
+    @Autowired
+    private PaymentTransactionRepository paymentTransactionRepository;
+
+    @Autowired
+    private AmortizationScheduleRepository amortizationScheduleRepository;
+
+    @Autowired
     private AuditLogService auditLogService;
 
     public Map<String, Object> getPortfolioMetrics() {
@@ -49,6 +56,22 @@ public class AdminService {
         BigDecimal totalDrawnBalance = creditLineRepository.sumTotalDrawnBalance();
         long activeCreditLines = creditLineRepository.countByStatus("ACTIVE");
 
+        BigDecimal totalDisbursedFunds = loanDisbursementRepository.sumTotalDisbursedPrincipal();
+        BigDecimal totalOutstandingBalance = loanDisbursementRepository.sumTotalOutstandingBalance();
+        BigDecimal totalCollectedPayments = paymentTransactionRepository.sumTotalCollected();
+        long activeLoansCount = loanDisbursementRepository.findByStatusOrderByDisbursedAtDesc("ACTIVE").size();
+        long overdueInstallmentsCount = amortizationScheduleRepository.findByStatusOrderByDueDateAsc("OVERDUE").size();
+        long totalInstallmentsCount = amortizationScheduleRepository.count();
+
+        double nplRatio = 0.0;
+        double recoveryRate = 100.0;
+        if (totalInstallmentsCount > 0) {
+            nplRatio = BigDecimal.valueOf(overdueInstallmentsCount * 100.0 / totalInstallmentsCount)
+                    .setScale(1, RoundingMode.HALF_UP).doubleValue();
+            recoveryRate = BigDecimal.valueOf(100.0 - nplRatio)
+                    .setScale(1, RoundingMode.HALF_UP).doubleValue();
+        }
+
         metrics.put("totalUsers", totalUsers);
         metrics.put("totalBorrowers", totalBorrowers);
         metrics.put("totalUnderwriters", totalUnderwriters);
@@ -57,10 +80,13 @@ public class AdminService {
         metrics.put("totalApprovedCredit", totalApprovedCredit);
         metrics.put("totalDrawnBalance", totalDrawnBalance);
         metrics.put("activeCreditLines", activeCreditLines);
-
-        // Performance ratios (simulated portfolio benchmarks)
-        metrics.put("repaymentRecoveryRate", 98.4); // 98.4% recovery rate
-        metrics.put("nonPerformingLoanRatio", 1.6); // 1.6% NPL ratio
+        metrics.put("totalDisbursedFunds", totalDisbursedFunds);
+        metrics.put("totalOutstandingBalance", totalOutstandingBalance);
+        metrics.put("totalCollectedPayments", totalCollectedPayments);
+        metrics.put("activeLoansCount", activeLoansCount);
+        metrics.put("overdueInstallmentsCount", overdueInstallmentsCount);
+        metrics.put("repaymentRecoveryRate", recoveryRate);
+        metrics.put("nonPerformingLoanRatio", nplRatio);
 
         return metrics;
     }

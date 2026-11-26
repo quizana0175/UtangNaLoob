@@ -2,6 +2,7 @@ package com.utangnaloob.config;
 
 import com.utangnaloob.entity.*;
 import com.utangnaloob.repository.*;
+import com.utangnaloob.service.DelinquencyService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,6 +11,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.HashSet;
 import java.util.Set;
@@ -38,6 +40,12 @@ public class DataInitializer implements CommandLineRunner {
     private AuditLogRepository auditLogRepository;
 
     @Autowired
+    private LoanDisbursementRepository loanDisbursementRepository;
+
+    @Autowired
+    private DelinquencyService delinquencyService;
+
+    @Autowired
     private PasswordEncoder passwordEncoder;
 
     @Override
@@ -61,6 +69,8 @@ public class DataInitializer implements CommandLineRunner {
         initSystemParameter("DAILY_LATE_PENALTY_RATE", "0.005", "Daily overdue delinquency penalty surcharge (0.5% daily)", "SYSTEM");
         initSystemParameter("MIN_LOAN_AMOUNT", "1000.00", "Minimum installment loan drawdown disbursement amount (PHP)", "SYSTEM");
         initSystemParameter("MAX_INITIAL_CREDIT_LIMIT", "50000.00", "Maximum algorithmic revolving credit limit ceiling for first-time applicants (PHP)", "SYSTEM");
+        initSystemParameter("MAX_DTI_RATIO", "0.30", "Maximum Debt-to-Income ratio for algorithmic credit limit calculation (30%)", "SYSTEM");
+        initSystemParameter("CREDIT_LIMIT_UPGRADE_PERCENT", "0.10", "Automatic credit limit tier increase after 2 consecutive on-time paid loans (10%)", "SYSTEM");
 
         // 3. Seed System Administrator
         if (!userRepository.existsByEmail("admin@utangnaloob.ph")) {
@@ -160,6 +170,34 @@ public class DataInitializer implements CommandLineRunner {
             creditLine.setUpdatedAt(LocalDateTime.now().minusDays(5));
             creditLineRepository.save(creditLine);
 
+            // Seed matching active loan for PHP 7,500 drawn balance with upcoming due reminder
+            LoanDisbursement loan = new LoanDisbursement();
+            loan.setUser(savedBorrower);
+            loan.setPrincipalAmount(new BigDecimal("7500.00"));
+            loan.setInstallmentTermMonths(3);
+            loan.setRepaymentFrequency("MONTHLY");
+            loan.setMonthlyInterestRate(new BigDecimal("0.02"));
+            loan.setTotalInterestAmount(new BigDecimal("450.00"));
+            loan.setProcessingFee(new BigDecimal("150.00"));
+            loan.setTotalRepaymentAmount(new BigDecimal("8100.00"));
+            loan.setOutstandingBalance(new BigDecimal("8100.00"));
+            loan.setStatus("ACTIVE");
+            loan.setLoanPurpose("Home Appliance & Utility Advance");
+            loan.setDisbursedAt(LocalDateTime.now().minusDays(27));
+
+            for (int i = 1; i <= 3; i++) {
+                AmortizationSchedule inst = new AmortizationSchedule();
+                inst.setInstallmentNumber(i);
+                inst.setDueDate(LocalDate.now().plusDays(3L + (i - 1) * 30L));
+                inst.setPrincipalDue(new BigDecimal("2500.00"));
+                inst.setInterestDue(new BigDecimal("150.00"));
+                inst.setTotalDue(new BigDecimal("2700.00"));
+                inst.setAmountPaid(BigDecimal.ZERO);
+                inst.setStatus("PENDING");
+                loan.addInstallment(inst);
+            }
+            loanDisbursementRepository.save(loan);
+
             logger.info("Created default Active Borrower: borrower@utangnaloob.ph / Borrower@123");
         }
 
@@ -205,6 +243,83 @@ public class DataInitializer implements CommandLineRunner {
 
             logger.info("Created default Pending Applicant: applicant@utangnaloob.ph / Borrower@123");
         }
+
+        // 7. Seed Borrower with an Overdue Loan for Underwriter Delinquency & Penalty Demo
+        if (!userRepository.existsByEmail("delinquent@utangnaloob.ph")) {
+            User delinquent = new User(
+                    "Ramon",
+                    "Bautista",
+                    "delinquent@utangnaloob.ph",
+                    passwordEncoder.encode("Borrower@123"),
+                    "09190000005",
+                    "1991-08-21",
+                    "78 Taft Avenue, Malate, Manila",
+                    "FREELANCER",
+                    28000.0
+            );
+            Set<Role> roles = new HashSet<>();
+            roles.add(borrowerRole);
+            delinquent.setRoles(roles);
+            User savedDelinquent = userRepository.save(delinquent);
+
+            KycProfile kyc = new KycProfile(savedDelinquent);
+            kyc.setIdType("SSS");
+            kyc.setIdNumber("34-5678901-2");
+            kyc.setIdDocumentUrl("https://images.unsplash.com/photo-1589829545856-d10d557cf95f?auto=format&fit=crop&w=600&q=80");
+            kyc.setProofOfIncomeType("ITR");
+            kyc.setProofOfIncomeUrl("https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=600&q=80");
+            kyc.setKycStatus("VERIFIED");
+            kyc.setVerifiedMonthlyIncome(28000.0);
+            kyc.setRecommendedCreditLimit(11000.0);
+            kyc.setReviewedBy("underwriter@utangnaloob.ph");
+            kyc.setReviewedAt(LocalDateTime.now().minusDays(40));
+            kycProfileRepository.save(kyc);
+
+            CreditLine cl = new CreditLine(savedDelinquent, new BigDecimal("11000.00"));
+            cl.setAvailableBalance(new BigDecimal("6000.00"));
+            cl.setDrawnBalance(new BigDecimal("5000.00"));
+            cl.setStatus("ACTIVE");
+            creditLineRepository.save(cl);
+
+            LoanDisbursement overdueLoan = new LoanDisbursement();
+            overdueLoan.setUser(savedDelinquent);
+            overdueLoan.setPrincipalAmount(new BigDecimal("5000.00"));
+            overdueLoan.setInstallmentTermMonths(2);
+            overdueLoan.setRepaymentFrequency("MONTHLY");
+            overdueLoan.setMonthlyInterestRate(new BigDecimal("0.02"));
+            overdueLoan.setTotalInterestAmount(new BigDecimal("200.00"));
+            overdueLoan.setProcessingFee(new BigDecimal("150.00"));
+            overdueLoan.setTotalRepaymentAmount(new BigDecimal("5350.00"));
+            overdueLoan.setOutstandingBalance(new BigDecimal("5350.00"));
+            overdueLoan.setStatus("ACTIVE");
+            overdueLoan.setLoanPurpose("Medical & Emergency Expense");
+            overdueLoan.setDisbursedAt(LocalDateTime.now().minusDays(40));
+
+            AmortizationSchedule inst1 = new AmortizationSchedule();
+            inst1.setInstallmentNumber(1);
+            inst1.setDueDate(LocalDate.now().minusDays(10)); // 10 days past due (> 3 day grace)
+            inst1.setPrincipalDue(new BigDecimal("2500.00"));
+            inst1.setInterestDue(new BigDecimal("100.00"));
+            inst1.setTotalDue(new BigDecimal("2675.00"));
+            inst1.setAmountPaid(BigDecimal.ZERO);
+            inst1.setStatus("PENDING");
+            overdueLoan.addInstallment(inst1);
+
+            AmortizationSchedule inst2 = new AmortizationSchedule();
+            inst2.setInstallmentNumber(2);
+            inst2.setDueDate(LocalDate.now().plusDays(20));
+            inst2.setPrincipalDue(new BigDecimal("2500.00"));
+            inst2.setInterestDue(new BigDecimal("100.00"));
+            inst2.setTotalDue(new BigDecimal("2675.00"));
+            inst2.setAmountPaid(BigDecimal.ZERO);
+            inst2.setStatus("PENDING");
+            overdueLoan.addInstallment(inst2);
+
+            loanDisbursementRepository.save(overdueLoan);
+        }
+
+        // Evaluate overdue installments and apply automated penalties at startup
+        delinquencyService.evaluateOverdueAndPenalties();
 
         logger.info("Utang na Loob seed data initialization complete.");
     }

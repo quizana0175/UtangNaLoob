@@ -98,12 +98,17 @@
       requestLoan: (d) => request('/borrower/loans/request', { method: 'POST', body: JSON.stringify(d) }),
       getMyLoans: () => request('/borrower/loans'),
       payInstallment: (d) => request('/borrower/loans/pay', { method: 'POST', body: JSON.stringify(d) }),
-      getPaymentHistory: () => request('/borrower/loans/payments')
+      getPaymentHistory: () => request('/borrower/loans/payments'),
+      getConfig: () => request('/borrower/config'),
+      getAlerts: () => request('/borrower/alerts')
     };
 
     const underwriterApi = {
       getQueue: () => request('/underwriter/queue'),
-      reviewApplicant: (id, d) => request(`/underwriter/review/${id}`, { method: 'POST', body: JSON.stringify(d) })
+      reviewApplicant: (id, d) => request(`/underwriter/review/${id}`, { method: 'POST', body: JSON.stringify(d) }),
+      getDelinquencies: () => request('/underwriter/delinquencies'),
+      getPenaltyLogs: () => request('/underwriter/penalty-logs'),
+      runDelinquencyCheck: () => request('/underwriter/delinquencies/run-check', { method: 'POST' })
     };
 
     const adminApi = {
@@ -582,6 +587,8 @@
       const [profile, setProfile] = useState(null);
       const [loans, setLoans] = useState([]);
       const [payments, setPayments] = useState([]);
+      const [alerts, setAlerts] = useState([]);
+      const [loanConfig, setLoanConfig] = useState({ monthlyInterestRate: 0.02, minLoanAmount: 1000, gracePeriodDays: 3, dailyLatePenaltyRate: 0.005 });
       const [loading, setLoading] = useState(true);
       const [actionMsg, setActionMsg] = useState(null);
 
@@ -614,14 +621,18 @@
 
       const loadData = async () => {
         try {
-          const [prof, userLoans, userPayments] = await Promise.all([
+          const [prof, userLoans, userPayments, userAlerts, cfg] = await Promise.all([
             borrowerApi.getDashboard(),
             borrowerApi.getMyLoans().catch(() => []),
-            borrowerApi.getPaymentHistory().catch(() => [])
+            borrowerApi.getPaymentHistory().catch(() => []),
+            borrowerApi.getAlerts().catch(() => []),
+            borrowerApi.getConfig().catch(() => null)
           ]);
           setProfile(prof);
           setLoans(userLoans);
           setPayments(userPayments);
+          setAlerts(Array.isArray(userAlerts) ? userAlerts : []);
+          if (cfg) setLoanConfig(cfg);
           if (prof.monthlyIncome) {
             setKycForm(prev => ({ ...prev, monthlyIncome: prof.monthlyIncome }));
           }
@@ -672,10 +683,11 @@
         setSubmittingPay(true);
         setActionMsg(null);
         try {
+          const instDue = Number(selectedInstallment.totalDue || 0) + Number(selectedInstallment.penaltyFee || 0);
           const res = await borrowerApi.payInstallment({
             loanId: selectedLoan.id,
             installmentId: selectedInstallment.id,
-            amount: selectedInstallment.totalDue,
+            amount: instDue,
             paymentMethod: payMethod
           });
           setSelectedInstallment(null);
@@ -698,10 +710,12 @@
       const kycStatus = profile?.kycStatus || 'NOT_SUBMITTED';
       const isKycVerified = kycStatus === 'VERIFIED';
 
-      const reqAmount = Number(loanForm.amount) || 1000;
+      const minLoan = Number(loanConfig?.minLoanAmount) || 1000;
+      const monthlyRate = Number(loanConfig?.monthlyInterestRate) || 0.02;
+      const reqAmount = Number(loanForm.amount) || minLoan;
       const reqTerm = Number(loanForm.installmentTermMonths) || 3;
       const reqFreq = loanForm.repaymentFrequency;
-      const reqInterest = reqAmount * 0.02 * reqTerm;
+      const reqInterest = reqAmount * monthlyRate * reqTerm;
       const reqFee = Math.max(150, reqAmount * 0.015);
       const reqTotal = reqAmount + reqInterest + reqFee;
       const reqCount = reqFreq === 'BI_WEEKLY' ? reqTerm * 2 : reqTerm;
@@ -741,6 +755,46 @@
             <div className={`p-4 rounded-xl text-sm flex items-center space-x-2 ${actionMsg.type === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'}`}>
               <span className="font-bold">{actionMsg.type === 'success' ? '✓' : '!'}</span>
               <span>{actionMsg.text}</span>
+            </div>
+          )}
+
+          {/* Automated Due-Date Reminders & Billing Alerts */}
+          {alerts.length > 0 && (
+            <div className="bg-slate-900 border border-amber-500/30 rounded-2xl p-5 shadow-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-amber-300 uppercase tracking-wider">Billing Alerts & Due-Date Reminders ({alerts.length})</h2>
+                <span className="text-xs text-slate-400">Grace period: {loanConfig.gracePeriodDays} days • Late penalty: {(Number(loanConfig.dailyLatePenaltyRate || 0.005) * 100).toFixed(2)}%/day</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {alerts.map(a => {
+                  const loanObj = loans.find(l => l.id === a.loanId);
+                  const instObj = loanObj?.installments?.find(i => i.id === a.installmentId);
+                  return (
+                    <div key={a.installmentId} className={`p-3.5 rounded-xl border flex justify-between items-center ${a.severity === 'CRITICAL' ? 'bg-rose-950/30 border-rose-500/40' : a.severity === 'WARNING' ? 'bg-amber-950/30 border-amber-500/40' : 'bg-slate-950 border-slate-800'}`}>
+                      <div>
+                        <div className={`text-xs font-bold ${a.severity === 'CRITICAL' ? 'text-rose-300' : a.severity === 'WARNING' ? 'text-amber-300' : 'text-emerald-300'}`}>
+                          {a.title}
+                        </div>
+                        <div className="text-xs text-slate-300 mt-0.5">
+                          Loan #{a.loanId} • Installment #{a.installmentNumber} • Due: {a.dueDate}
+                        </div>
+                        <div className="text-xs font-bold text-white mt-0.5">
+                          Total Due: ₱{Number(a.totalDueWithPenalty || a.baseDue).toLocaleString()}
+                          {Number(a.penaltyFee) > 0 && <span className="text-rose-400 ml-1">(incl. ₱{Number(a.penaltyFee).toFixed(2)} penalty)</span>}
+                        </div>
+                      </div>
+                      {loanObj && instObj && (
+                        <button
+                          onClick={() => { setSelectedLoan(loanObj); setSelectedInstallment(instObj); }}
+                          className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-xs shrink-0"
+                        >
+                          Pay Now
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
@@ -797,8 +851,49 @@
                         <span className="text-xs font-bold text-emerald-400 uppercase">Loan #{loan.id} • {loan.loanPurpose}</span>
                         <div className="text-xs text-slate-300">Principal: ₱{loan.principalAmount?.toLocaleString()} • Total Repayment: ₱{loan.totalRepaymentAmount?.toLocaleString()}</div>
                       </div>
-                      <div className="text-right">
-                        <span className={`text-xs px-2 py-0.5 rounded font-bold ${loan.status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{loan.status}</span>
+                      <div className="text-right flex flex-col items-end gap-1">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rows = (loan.installments || []).map(i => `
+                                <tr>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">#${i.installmentNumber}</td>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">${i.dueDate}</td>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">PHP ${Number(i.principalDue || 0).toLocaleString()}</td>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">PHP ${Number(i.interestDue || 0).toLocaleString()}</td>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">PHP ${Number(i.penaltyFee || 0).toLocaleString()}</td>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">PHP ${Number(i.totalDue || 0).toLocaleString()}</td>
+                                  <td style="padding:8px;border:1px solid #cbd5e1;">${i.status}</td>
+                                </tr>`).join('');
+                              const win = window.open('', '_blank', 'width=850,height=700');
+                              if (!win) return;
+                              win.document.write(`<!DOCTYPE html><html><head><title>Statement of Account - Loan #${loan.id}</title></head><body style="font-family:Arial,sans-serif;padding:32px;color:#0f172a;">
+                                <h2 style="margin:0 0 4px;">Utang na Loob &mdash; Statement of Account &amp; Amortization</h2>
+                                <p style="margin:0 0 16px;color:#475569;font-size:13px;">Loan #${loan.id} &bull; Purpose: ${loan.loanPurpose || 'Cash Advance'} &bull; Status: ${loan.status}</p>
+                                <p style="font-size:13px;"><strong>Principal:</strong> PHP ${Number(loan.principalAmount || 0).toLocaleString()} &nbsp;|&nbsp; <strong>Total Repayment:</strong> PHP ${Number(loan.totalRepaymentAmount || 0).toLocaleString()} &nbsp;|&nbsp; <strong>Outstanding:</strong> PHP ${Number(loan.outstandingBalance || 0).toLocaleString()}</p>
+                                <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:16px;">
+                                  <thead><tr style="background:#f1f5f9;">
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">#</th>
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">Due Date</th>
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">Principal</th>
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">Interest</th>
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">Penalty</th>
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">Total Due</th>
+                                    <th style="padding:8px;border:1px solid #cbd5e1;text-align:left;">Status</th>
+                                  </tr></thead>
+                                  <tbody>${rows}</tbody>
+                                </table>
+                              </body></html>`);
+                              win.document.close();
+                              win.print();
+                            }}
+                            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-[11px] font-semibold border border-slate-700"
+                          >
+                            Print / PDF
+                          </button>
+                          <span className={`text-xs px-2 py-0.5 rounded font-bold ${loan.status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{loan.status}</span>
+                        </div>
                         <div className="text-xs text-slate-400 mt-0.5">Remaining: ₱{loan.outstandingBalance?.toLocaleString()}</div>
                       </div>
                     </div>
@@ -811,20 +906,25 @@
                             <th className="p-2">Due Date</th>
                             <th className="p-2">Principal</th>
                             <th className="p-2">Interest</th>
+                            <th className="p-2">Penalty</th>
                             <th className="p-2">Total Due</th>
                             <th className="p-2">Status</th>
                             <th className="p-2 text-right">Repayment</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800">
-                          {loan.installments?.map(inst => (
+                          {loan.installments?.map(inst => {
+                            const penalty = Number(inst.penaltyFee || 0);
+                            const fullDue = Number(inst.totalDue || 0) + penalty;
+                            return (
                             <tr key={inst.id} className="hover:bg-slate-900/40">
                               <td className="p-2 font-bold">{inst.installmentNumber}</td>
                               <td className="p-2">{inst.dueDate}</td>
                               <td className="p-2">₱{inst.principalDue?.toLocaleString()}</td>
                               <td className="p-2">₱{inst.interestDue?.toLocaleString()}</td>
-                              <td className="p-2 font-bold text-white">₱{inst.totalDue?.toLocaleString()}</td>
-                              <td className="p-2"><span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${inst.status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{inst.status}</span></td>
+                              <td className="p-2">{penalty > 0 ? <span className="text-rose-400 font-semibold">₱{penalty.toFixed(2)}</span> : '—'}</td>
+                              <td className="p-2 font-bold text-white">₱{fullDue.toLocaleString()}</td>
+                              <td className="p-2"><span className={`px-2 py-0.5 rounded text-[11px] font-semibold ${inst.status === 'PAID' ? 'bg-emerald-500/10 text-emerald-400' : inst.status === 'OVERDUE' ? 'bg-rose-500/10 text-rose-400' : 'bg-amber-500/10 text-amber-400'}`}>{inst.status}</span></td>
                               <td className="p-2 text-right">
                                 {inst.status !== 'PAID' ? (
                                   <button
@@ -838,7 +938,7 @@
                                 )}
                               </td>
                             </tr>
-                          ))}
+                          );})}
                         </tbody>
                       </table>
                     </div>
@@ -936,7 +1036,7 @@
                   </div>
 
                   <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl space-y-1 text-xs">
-                    <div className="flex justify-between text-slate-400"><span>Interest (2% / mo):</span><span>₱{reqInterest.toFixed(2)}</span></div>
+                    <div className="flex justify-between text-slate-400"><span>Interest ({(monthlyRate * 100).toFixed(2)}% / mo):</span><span>₱{reqInterest.toFixed(2)}</span></div>
                     <div className="flex justify-between text-slate-400"><span>Processing Fee:</span><span>₱{reqFee.toFixed(2)}</span></div>
                     <div className="flex justify-between font-bold text-white pt-1 border-t border-slate-800"><span>Total Repayment:</span><span className="text-emerald-400">₱{reqTotal.toFixed(2)}</span></div>
                     <div className="flex justify-between font-bold text-emerald-400"><span>Due per Installment ({reqCount}x):</span><span>₱{(reqTotal / reqCount).toFixed(2)}</span></div>
@@ -944,7 +1044,7 @@
 
                   <div className="flex justify-end space-x-2 pt-2">
                     <button type="button" onClick={() => setShowLoanModal(false)} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs">Cancel</button>
-                    <button type="submit" disabled={submittingLoan || reqAmount > availableBalance || reqAmount < 1000} className="px-4 py-2 bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs shadow">
+                    <button type="submit" disabled={submittingLoan || reqAmount > availableBalance || reqAmount < minLoan} className="px-4 py-2 bg-emerald-500 text-slate-950 font-bold rounded-lg text-xs shadow">
                       {submittingLoan ? 'Processing...' : 'Confirm Loan Disbursement'}
                     </button>
                   </div>
@@ -965,8 +1065,8 @@
 
                 <form onSubmit={handlePayInstallment} className="space-y-4">
                   <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-center">
-                    <span className="text-xs text-slate-400 block mb-1">Total Due</span>
-                    <span className="text-2xl font-black text-emerald-400">₱{selectedInstallment.totalDue?.toFixed(2)}</span>
+                    <span className="text-xs text-slate-400 block mb-1">Total Due {Number(selectedInstallment.penaltyFee || 0) > 0 ? '(Incl. Late Penalty)' : ''}</span>
+                    <span className="text-2xl font-black text-emerald-400">₱{(Number(selectedInstallment.totalDue || 0) + Number(selectedInstallment.penaltyFee || 0)).toFixed(2)}</span>
                   </div>
 
                   <div className="grid grid-cols-3 gap-2">
@@ -981,7 +1081,7 @@
                   </div>
 
                   <button type="submit" disabled={submittingPay} className="w-full py-3 bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold rounded-xl text-xs shadow">
-                    {submittingPay ? 'Processing...' : `Confirm Payment of ₱${selectedInstallment.totalDue?.toFixed(2)}`}
+                    {submittingPay ? 'Processing...' : `Confirm Payment of ₱${(Number(selectedInstallment.totalDue || 0) + Number(selectedInstallment.penaltyFee || 0)).toFixed(2)}`}
                   </button>
                 </form>
               </div>
@@ -1051,17 +1151,29 @@
 
     // Underwriter Dashboard View
     function UnderwriterDashboardView() {
+      const [activeTab, setActiveTab] = useState('queue');
       const [queue, setQueue] = useState([]);
+      const [delinquencies, setDelinquencies] = useState([]);
+      const [penaltyLogs, setPenaltyLogs] = useState([]);
       const [loading, setLoading] = useState(true);
       const [msg, setMsg] = useState(null);
+      const [inspectTarget, setInspectTarget] = useState(null);
+      const [customLimit, setCustomLimit] = useState(0);
+      const [reviewNotes, setReviewNotes] = useState('');
       const [rejectTarget, setRejectTarget] = useState(null);
       const [rejectReason, setRejectReason] = useState('');
-      const [submittingReject, setSubmittingReject] = useState(false);
+      const [submitting, setSubmitting] = useState(false);
 
-      const loadQueue = async () => {
+      const loadAll = async () => {
         try {
-          const d = await underwriterApi.getQueue();
-          setQueue(d);
+          const [q, d, pl] = await Promise.all([
+            underwriterApi.getQueue(),
+            underwriterApi.getDelinquencies().catch(() => []),
+            underwriterApi.getPenaltyLogs().catch(() => [])
+          ]);
+          setQueue(Array.isArray(q) ? q : []);
+          setDelinquencies(Array.isArray(d) ? d : []);
+          setPenaltyLogs(Array.isArray(pl) ? pl : []);
         } catch (e) {
           console.error(e);
         } finally {
@@ -1069,32 +1181,46 @@
         }
       };
 
-      useEffect(() => { loadQueue(); }, []);
+      useEffect(() => { loadAll(); }, []);
 
-      const handleApprove = async (applicant) => {
+      const openInspect = (applicant) => {
+        const recLimit = Math.min(Math.round((applicant.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
+        setInspectTarget(applicant);
+        setCustomLimit(recLimit);
+        setReviewNotes('Verified government ID and income documentation.');
+        setMsg(null);
+      };
+
+      const handleApprove = async (applicant, limitOverride, notesOverride) => {
+        setSubmitting(true);
         setMsg(null);
         try {
-          const recLimit = Math.min(Math.round((applicant.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
+          const recLimit = limitOverride !== undefined
+            ? Number(limitOverride)
+            : Math.min(Math.round((applicant.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
           const res = await underwriterApi.reviewApplicant(applicant.id, {
             decision: 'VERIFIED',
             verifiedMonthlyIncome: applicant.monthlyIncome,
             approvedCreditLimit: recLimit,
-            notesOrRejectionReason: 'Approved by Underwriter — 40% income-based revolving limit assigned.'
+            notesOrRejectionReason: notesOverride || 'Approved by Underwriter — revolving credit limit assigned.'
           });
           setMsg({ type: 'success', text: `✓ ${res.message || 'Application approved. Credit limit of ₱' + recLimit.toLocaleString() + ' assigned.'}` });
-          loadQueue();
+          setInspectTarget(null);
+          loadAll();
         } catch (e) {
           setMsg({ type: 'error', text: e.message });
+        } finally {
+          setSubmitting(false);
         }
       };
 
       const handleRejectSubmit = async (e) => {
         e.preventDefault();
         if (!rejectTarget || !rejectReason.trim()) return;
-        setSubmittingReject(true);
+        setSubmitting(true);
         setMsg(null);
         try {
-          const res = await underwriterApi.reviewApplicant(rejectTarget.id, {
+          await underwriterApi.reviewApplicant(rejectTarget.id, {
             decision: 'REJECTED',
             verifiedMonthlyIncome: rejectTarget.monthlyIncome,
             approvedCreditLimit: 0,
@@ -1102,26 +1228,62 @@
           });
           setMsg({ type: 'error', text: `✗ Application rejected: ${rejectReason}` });
           setRejectTarget(null);
+          setInspectTarget(null);
           setRejectReason('');
-          loadQueue();
+          loadAll();
         } catch (e) {
           setMsg({ type: 'error', text: e.message });
         } finally {
-          setSubmittingReject(false);
+          setSubmitting(false);
+        }
+      };
+
+      const handleRunDelinquencyCheck = async () => {
+        setMsg(null);
+        try {
+          const res = await underwriterApi.runDelinquencyCheck();
+          setMsg({
+            type: 'success',
+            text: `Delinquency scan complete: ${res.markedOverdue} newly overdue, ${res.penaltiesApplied} penalty updates applied (Grace: ${res.gracePeriodDays}d).`
+          });
+          loadAll();
+        } catch (e) {
+          setMsg({ type: 'error', text: e.message });
         }
       };
 
       return (
         <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 flex justify-between items-center shadow-xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
             <div>
               <h1 className="text-2xl font-extrabold text-white">Underwriting & Credit Risk Console</h1>
-              <p className="text-slate-400 text-sm">Review borrower KYC documentation and approve or reject credit applications</p>
+              <p className="text-slate-400 text-sm">Inspect KYC documents, adjust credit limits, and monitor delinquent accounts</p>
             </div>
-            <div className="px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-center">
-              <span className="text-xs text-slate-400 block uppercase">Queue Count</span>
-              <span className="text-xl font-bold text-amber-400">{queue.length}</span>
+            <div className="flex gap-3">
+              <div className="px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-center">
+                <span className="text-xs text-slate-400 block uppercase">KYC Queue</span>
+                <span className="text-xl font-bold text-amber-400">{queue.length}</span>
+              </div>
+              <div className="px-4 py-2 bg-slate-950 border border-rose-900/40 rounded-xl text-center">
+                <span className="text-xs text-slate-400 block uppercase">Overdue</span>
+                <span className="text-xl font-bold text-rose-400">{delinquencies.length}</span>
+              </div>
             </div>
+          </div>
+
+          <div className="flex space-x-2 border-b border-slate-800">
+            <button
+              onClick={() => setActiveTab('queue')}
+              className={`px-5 py-3 text-sm font-semibold border-b-2 transition ${activeTab === 'queue' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+            >
+              Pending KYC Queue ({queue.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('delinquencies')}
+              className={`px-5 py-3 text-sm font-semibold border-b-2 transition ${activeTab === 'delinquencies' ? 'border-rose-500 text-rose-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+            >
+              Delinquent Accounts & Penalty Logs ({delinquencies.length})
+            </button>
           </div>
 
           {msg && (
@@ -1130,59 +1292,223 @@
             </div>
           )}
 
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-white mb-1">Pending KYC Applications</h2>
-            <p className="text-xs text-slate-400 mb-4">Approve with algorithmically recommended limit or reject with documented reason</p>
-            {loading ? <div className="py-8 text-center text-slate-400">Loading queue...</div> : queue.length === 0 ? (
-              <div className="py-8 text-center border border-dashed border-slate-800 rounded-xl text-slate-400">
-                <div className="text-2xl mb-2">✓</div>
-                <div>No pending KYC submissions. All applications reviewed.</div>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm text-slate-300">
-                  <thead className="bg-slate-950 text-xs uppercase text-slate-400">
-                    <tr>
-                      <th className="p-3">Applicant</th>
-                      <th className="p-3">Monthly Income</th>
-                      <th className="p-3">Gov't ID</th>
-                      <th className="p-3">ID Number</th>
-                      <th className="p-3">Rec. Limit (40%)</th>
-                      <th className="p-3 text-right">Decision</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {queue.map(a => {
-                      const recLimit = Math.min(Math.round((a.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
-                      return (
-                        <tr key={a.id} className="hover:bg-slate-800/40">
-                          <td className="p-3 font-semibold text-white">{a.firstName} {a.lastName} <div className="text-xs font-normal text-slate-400">{a.email}</div></td>
-                          <td className="p-3 text-emerald-400 font-bold">₱ {(a.monthlyIncome || 0).toLocaleString()}</td>
-                          <td className="p-3 text-slate-200">{a.idType || '—'}</td>
-                          <td className="p-3 font-mono text-xs text-slate-300">{a.idNumber || '—'}</td>
-                          <td className="p-3 font-bold text-white">₱ {recLimit.toLocaleString()}</td>
-                          <td className="p-3 text-right space-x-2">
-                            <button
-                              onClick={() => handleApprove(a)}
-                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold"
-                            >
-                              ✓ Approve
-                            </button>
-                            <button
-                              onClick={() => { setRejectTarget(a); setRejectReason(''); setMsg(null); }}
-                              className="px-3 py-1.5 bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-700/40 rounded-lg text-xs font-bold"
-                            >
-                              ✗ Reject
-                            </button>
-                          </td>
+          {activeTab === 'queue' && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+              <h2 className="text-lg font-bold text-white mb-1">Pending KYC Applications</h2>
+              <p className="text-xs text-slate-400 mb-4">Inspect submitted ID & proof of income, adjust recommended limit, or reject with reason</p>
+              {loading ? <div className="py-8 text-center text-slate-400">Loading queue...</div> : queue.length === 0 ? (
+                <div className="py-8 text-center border border-dashed border-slate-800 rounded-xl text-slate-400">
+                  <div className="text-2xl mb-2">✓</div>
+                  <div>No pending KYC submissions. All applications reviewed.</div>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm text-slate-300">
+                    <thead className="bg-slate-950 text-xs uppercase text-slate-400">
+                      <tr>
+                        <th className="p-3">Applicant</th>
+                        <th className="p-3">Monthly Income</th>
+                        <th className="p-3">Gov't ID</th>
+                        <th className="p-3">Income Proof</th>
+                        <th className="p-3">Rec. Limit (40%)</th>
+                        <th className="p-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {queue.map(a => {
+                        const recLimit = Math.min(Math.round((a.monthlyIncome || 25000) * 0.40 / 500) * 500, 50000);
+                        return (
+                          <tr key={a.id} className="hover:bg-slate-800/40">
+                            <td className="p-3 font-semibold text-white">{a.firstName} {a.lastName} <div className="text-xs font-normal text-slate-400">{a.email}</div></td>
+                            <td className="p-3 text-emerald-400 font-bold">₱ {(a.monthlyIncome || 0).toLocaleString()}</td>
+                            <td className="p-3 text-slate-200">{a.idType || '—'} <div className="font-mono text-xs text-slate-400">{a.idNumber || '—'}</div></td>
+                            <td className="p-3 text-xs text-slate-300">{a.proofOfIncomeType || '—'}</td>
+                            <td className="p-3 font-bold text-white">₱ {recLimit.toLocaleString()}</td>
+                            <td className="p-3 text-right space-x-2 whitespace-nowrap">
+                              <button
+                                onClick={() => openInspect(a)}
+                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold"
+                              >
+                                Inspect Docs
+                              </button>
+                              <button
+                                onClick={() => handleApprove(a)}
+                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold"
+                              >
+                                ✓ Quick Approve
+                              </button>
+                              <button
+                                onClick={() => { setRejectTarget(a); setRejectReason(''); setMsg(null); }}
+                                className="px-3 py-1.5 bg-rose-900/40 hover:bg-rose-800/60 text-rose-300 border border-rose-700/40 rounded-lg text-xs font-bold"
+                              >
+                                ✗ Reject
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'delinquencies' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+                  <div>
+                    <h2 className="text-lg font-bold text-white">Delinquent & Overdue Accounts</h2>
+                    <p className="text-xs text-slate-400">Installments past due date + grace period with automated daily penalties</p>
+                  </div>
+                  <button
+                    onClick={handleRunDelinquencyCheck}
+                    className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs"
+                  >
+                    Run Overdue & Penalty Check
+                  </button>
+                </div>
+
+                {delinquencies.length === 0 ? (
+                  <div className="py-8 text-center border border-dashed border-slate-800 rounded-xl text-slate-400 text-sm">
+                    No overdue installments found across active loans.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs text-slate-300">
+                      <thead className="bg-slate-950 uppercase text-slate-400">
+                        <tr>
+                          <th className="p-3">Borrower</th>
+                          <th className="p-3">Loan / Inst #</th>
+                          <th className="p-3">Due Date</th>
+                          <th className="p-3">Days Overdue</th>
+                          <th className="p-3">Base Due</th>
+                          <th className="p-3">Penalty Fee</th>
+                          <th className="p-3">Total Due</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {delinquencies.map(d => (
+                          <tr key={d.installmentId} className="hover:bg-slate-800/40">
+                            <td className="p-3 font-semibold text-white">{d.borrowerName} <div className="text-slate-400 font-normal">{d.borrowerEmail}</div></td>
+                            <td className="p-3">Loan #{d.loanId} • #{d.installmentNumber}</td>
+                            <td className="p-3 text-rose-300">{d.dueDate}</td>
+                            <td className="p-3"><span className="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 font-bold">{d.daysOverdue} days</span></td>
+                            <td className="p-3">₱{Number(d.baseDue).toLocaleString()}</td>
+                            <td className="p-3 text-rose-400 font-bold">+₱{Number(d.penaltyFee).toFixed(2)}</td>
+                            <td className="p-3 text-white font-bold">₱{Number(d.totalDueWithPenalty).toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                <h2 className="text-lg font-bold text-white mb-1">Automated Penalty Logs</h2>
+                <p className="text-xs text-slate-400 mb-4">System-generated audit entries for late penalty assessments</p>
+                {penaltyLogs.length === 0 ? (
+                  <div className="py-6 text-center text-slate-400 text-sm">No automated penalty logs recorded yet.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs text-slate-300">
+                      <thead className="bg-slate-950 uppercase text-slate-400">
+                        <tr>
+                          <th className="p-3">Timestamp</th>
+                          <th className="p-3">Borrower</th>
+                          <th className="p-3">Details</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {penaltyLogs.map((log, i) => (
+                          <tr key={log.id || i} className="hover:bg-slate-800/40">
+                            <td className="p-3 text-slate-400 whitespace-nowrap">{log.timestamp ? new Date(log.timestamp).toLocaleString() : '—'}</td>
+                            <td className="p-3 font-semibold text-white">{log.targetUser || '—'}</td>
+                            <td className="p-3 text-rose-300">{log.details}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Integrated Document Viewer & Limit Adjustment Modal */}
+          {inspectTarget && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+              <div className="bg-slate-900 border border-slate-700 rounded-3xl max-w-3xl w-full p-6 shadow-2xl space-y-5 my-8">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h3 className="text-lg font-bold text-white">KYC Document Inspector — {inspectTarget.firstName} {inspectTarget.lastName}</h3>
+                    <p className="text-xs text-slate-400">{inspectTarget.email} • {inspectTarget.employmentStatus} • Declared Income: ₱{(inspectTarget.monthlyIncome || 0).toLocaleString()}/mo</p>
+                  </div>
+                  <button onClick={() => setInspectTarget(null)} className="text-slate-400 hover:text-white font-bold">✕</button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3 space-y-2">
+                    <div className="text-xs font-bold text-emerald-400 uppercase">Gov't ID ({inspectTarget.idType} • {inspectTarget.idNumber})</div>
+                    <img
+                      src={inspectTarget.idDocumentUrl}
+                      alt="Government ID"
+                      className="w-full h-44 object-cover rounded-xl border border-slate-800 bg-slate-900"
+                    />
+                  </div>
+                  <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3 space-y-2">
+                    <div className="text-xs font-bold text-blue-400 uppercase">Proof of Income ({inspectTarget.proofOfIncomeType})</div>
+                    <img
+                      src={inspectTarget.proofOfIncomeUrl}
+                      alt="Proof of Income"
+                      className="w-full h-44 object-cover rounded-xl border border-slate-800 bg-slate-900"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-950 border border-slate-800 rounded-2xl p-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Approved Credit Limit (₱)</label>
+                    <input
+                      type="number" min="1000" step="500" value={customLimit}
+                      onChange={(e) => setCustomLimit(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white font-bold text-sm"
+                    />
+                    <span className="text-[11px] text-slate-400 mt-1 block">Algorithmic 40% recommendation pre-filled</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Underwriter Notes</label>
+                    <input
+                      type="text" value={reviewNotes}
+                      onChange={(e) => setReviewNotes(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end space-x-2">
+                  <button type="button" onClick={() => setInspectTarget(null)} className="px-4 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs">Close</button>
+                  <button
+                    type="button"
+                    onClick={() => { setRejectTarget(inspectTarget); setRejectReason(''); }}
+                    className="px-4 py-2 bg-rose-900/50 hover:bg-rose-800 text-rose-200 rounded-xl text-xs font-bold"
+                  >
+                    ✗ Reject
+                  </button>
+                  <button
+                    type="button"
+                    disabled={submitting || Number(customLimit) < 1000}
+                    onClick={() => handleApprove(inspectTarget, customLimit, reviewNotes)}
+                    className="px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-xl text-xs font-bold disabled:opacity-50"
+                  >
+                    {submitting ? 'Approving...' : `✓ Approve ₱${Number(customLimit).toLocaleString()} Limit`}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Reject Reason Modal */}
           {rejectTarget && (
@@ -1208,8 +1534,8 @@
                   </div>
                   <div className="flex justify-end space-x-2">
                     <button type="button" onClick={() => setRejectTarget(null)} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-lg text-xs">Cancel</button>
-                    <button type="submit" disabled={submittingReject || !rejectReason.trim()} className="px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white font-bold rounded-lg text-xs disabled:opacity-50">
-                      {submittingReject ? 'Submitting...' : 'Confirm Rejection'}
+                    <button type="submit" disabled={submitting || !rejectReason.trim()} className="px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white font-bold rounded-lg text-xs disabled:opacity-50">
+                      {submitting ? 'Submitting...' : 'Confirm Rejection'}
                     </button>
                   </div>
                 </form>
@@ -1228,6 +1554,9 @@
       const [logs, setLogs] = useState([]);
       const [loading, setLoading] = useState(true);
       const [msg, setMsg] = useState(null);
+      const [editingParam, setEditingParam] = useState(null);
+      const [editValue, setEditValue] = useState('');
+      const [savingParam, setSavingParam] = useState(false);
 
       const load = async () => {
         try {
@@ -1239,8 +1568,8 @@
           ]);
           setMetrics(m);
           setUsers(u);
-          setParams(p);
-          setLogs(l);
+          setParams(Array.isArray(p) ? p : []);
+          setLogs(Array.isArray(l) ? l : []);
         } catch (e) {
           console.error(e);
         } finally {
@@ -1254,7 +1583,7 @@
         setMsg(null);
         try {
           await adminApi.toggleUserStatus(id);
-          setMsg({ type: 'success', text: 'User status toggled.' });
+          setMsg({ type: 'success', text: 'User account status toggled successfully.' });
           load();
         } catch (e) {
           setMsg({ type: 'error', text: e.message });
@@ -1265,19 +1594,41 @@
         setMsg(null);
         try {
           await adminApi.updateUserRoles(id, [r]);
-          setMsg({ type: 'success', text: `Role updated to ${r}` });
+          setMsg({ type: 'success', text: `Role updated to ${r}.` });
           load();
         } catch (e) {
           setMsg({ type: 'error', text: e.message });
         }
       };
 
+      const handleEditParam = (param) => {
+        setEditingParam(param.paramKey);
+        setEditValue(param.paramValue);
+      };
+
+      const handleSaveParam = async (paramKey) => {
+        setSavingParam(true);
+        setMsg(null);
+        try {
+          await adminApi.updateParameter(paramKey, editValue);
+          setMsg({ type: 'success', text: `Parameter "${paramKey}" updated to ${editValue}.` });
+          setEditingParam(null);
+          load();
+        } catch (e) {
+          setMsg({ type: 'error', text: e.message });
+        } finally {
+          setSavingParam(false);
+        }
+      };
+
+      if (loading) return <div className="p-12 text-center text-slate-400">Loading Admin Dashboard...</div>;
+
       return (
         <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 flex justify-between items-center shadow-xl">
             <div>
               <h1 className="text-2xl font-extrabold text-white">System Administration Dashboard</h1>
-              <p className="text-slate-400 text-sm">Portfolio KPIs, Role-Based Access Control & Audit Log Engine</p>
+              <p className="text-slate-400 text-sm">Portfolio KPIs, Role-Based Access Control, System Parameters & Audit Log Engine</p>
             </div>
             <span className="text-xs px-2.5 py-1 rounded-full font-semibold border bg-purple-500/10 text-purple-400 border-purple-500/30">
               Admin
@@ -1285,41 +1636,52 @@
           </div>
 
           {msg && (
-            <div className={`p-4 rounded-xl text-sm ${msg.type === 'success' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>
+            <div className={`p-4 rounded-xl text-sm font-medium ${msg.type === 'success' ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'}`}>
               {msg.text}
             </div>
           )}
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {/* Portfolio KPI Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-slate-400 uppercase block">Total Users</span>
+              <span className="text-xs text-slate-400 uppercase block mb-1">Total Users</span>
               <span className="text-2xl font-bold text-white">{metrics?.totalUsers || 0}</span>
             </div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-slate-400 uppercase block">Approved Credit</span>
-              <span className="text-2xl font-bold text-emerald-400">₱ {(metrics?.totalApprovedCredit || 0).toLocaleString()}</span>
+            <div className="bg-slate-900 border border-emerald-500/20 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Approved Credit</span>
+              <span className="text-xl font-bold text-emerald-400">₱ {(metrics?.totalApprovedCredit || 0).toLocaleString()}</span>
+            </div>
+            <div className="bg-slate-900 border border-blue-500/20 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Disbursed Funds</span>
+              <span className="text-xl font-bold text-blue-400">₱ {(metrics?.totalDisbursedFunds || 0).toLocaleString()}</span>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-slate-400 uppercase block">Recovery Rate</span>
-              <span className="text-2xl font-bold text-emerald-400">{metrics?.repaymentRecoveryRate || 98.4}%</span>
+              <span className="text-xs text-slate-400 uppercase block mb-1">Active Lines</span>
+              <span className="text-2xl font-bold text-white">{metrics?.activeCreditLines || 0}</span>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-slate-400 uppercase block">NPL Ratio</span>
-              <span className="text-2xl font-bold text-rose-400">{metrics?.nonPerformingLoanRatio || 1.6}%</span>
+              <span className="text-xs text-slate-400 uppercase block mb-1">Recovery Rate</span>
+              <span className="text-2xl font-bold text-emerald-400">{metrics?.repaymentRecoveryRate ?? 100}%</span>
+            </div>
+            <div className="bg-slate-900 border border-rose-500/20 rounded-xl p-4">
+              <span className="text-xs text-slate-400 uppercase block mb-1">Delinquency Rate</span>
+              <span className="text-2xl font-bold text-rose-400">{metrics?.nonPerformingLoanRatio ?? 0}%</span>
             </div>
           </div>
 
+          {/* User Management */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-white mb-4">User Accounts & Role Permissions</h2>
+            <h2 className="text-lg font-bold text-white mb-1">User Accounts & Role Permissions</h2>
+            <p className="text-xs text-slate-400 mb-4">Manage roles, account status, and access control for all system users</p>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm text-slate-300">
                 <thead className="bg-slate-950 text-xs uppercase text-slate-400">
                   <tr>
                     <th className="p-3">User</th>
-                    <th className="p-3">Role</th>
-                    <th className="p-3">Status</th>
-                    <th className="p-3">Change Role</th>
-                    <th className="p-3 text-right">Action</th>
+                    <th className="p-3">Current Role</th>
+                    <th className="p-3">Account Status</th>
+                    <th className="p-3">Assign Role</th>
+                    <th className="p-3 text-right">Status Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
@@ -1328,7 +1690,9 @@
                     return (
                       <tr key={u.id} className="hover:bg-slate-800/40">
                         <td className="p-3 font-semibold text-white">{u.firstName} {u.lastName} <div className="text-xs font-normal text-slate-400">{u.email}</div></td>
-                        <td className="p-3"><span className="text-xs px-2 py-0.5 rounded bg-slate-800 font-semibold">{r}</span></td>
+                        <td className="p-3">
+                          <span className={`text-xs px-2 py-0.5 rounded font-semibold ${r === 'ADMIN' ? 'bg-purple-500/10 text-purple-400' : r === 'UNDERWRITER' ? 'bg-blue-500/10 text-blue-400' : 'bg-emerald-500/10 text-emerald-400'}`}>{r}</span>
+                        </td>
                         <td className="p-3"><span className={`text-xs px-2 py-0.5 rounded ${u.accountStatus === 'ACTIVE' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>{u.accountStatus}</span></td>
                         <td className="p-3">
                           <select
@@ -1343,7 +1707,7 @@
                         <td className="p-3 text-right">
                           <button
                             onClick={() => handleToggleStatus(u.id)}
-                            className={`px-3 py-1 rounded text-xs font-semibold ${u.accountStatus === 'ACTIVE' ? 'bg-rose-950/40 text-rose-300 border border-rose-800/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-800/40'}`}
+                            className={`px-3 py-1 rounded text-xs font-semibold ${u.accountStatus === 'ACTIVE' ? 'bg-rose-950/40 text-rose-300 border border-rose-800/40 hover:bg-rose-900/60' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-800/40 hover:bg-emerald-900/60'}`}
                           >
                             {u.accountStatus === 'ACTIVE' ? 'Lock' : 'Activate'}
                           </button>
@@ -1355,6 +1719,94 @@
               </table>
             </div>
           </div>
+
+          {/* System Parameters */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-white mb-1">System Financial Parameters</h2>
+            <p className="text-xs text-slate-400 mb-4">Configure platform-wide interest rates, grace periods, penalty formulas, and loan term options</p>
+            {params.length === 0 ? (
+              <div className="py-6 text-center text-slate-400 text-sm">No system parameters found.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm text-slate-300">
+                  <thead className="bg-slate-950 text-xs uppercase text-slate-400">
+                    <tr>
+                      <th className="p-3">Parameter Key</th>
+                      <th className="p-3">Description</th>
+                      <th className="p-3">Current Value</th>
+                      <th className="p-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {params.map(p => (
+                      <tr key={p.paramKey} className="hover:bg-slate-800/40">
+                        <td className="p-3 font-mono text-xs text-amber-300 font-semibold">{p.paramKey}</td>
+                        <td className="p-3 text-slate-400 text-xs">{p.description || '—'}</td>
+                        <td className="p-3">
+                          {editingParam === p.paramKey ? (
+                            <input
+                              type="text" value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              className="w-full px-2 py-1 bg-slate-950 border border-emerald-500 rounded text-sm text-white font-mono"
+                              autoFocus
+                            />
+                          ) : (
+                            <span className="font-mono font-bold text-white">{p.paramValue}</span>
+                          )}
+                        </td>
+                        <td className="p-3 text-right">
+                          {editingParam === p.paramKey ? (
+                            <div className="flex justify-end gap-2">
+                              <button onClick={() => setEditingParam(null)} className="px-2 py-1 bg-slate-800 text-slate-300 rounded text-xs">Cancel</button>
+                              <button onClick={() => handleSaveParam(p.paramKey)} disabled={savingParam} className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold disabled:opacity-50">
+                                {savingParam ? 'Saving...' : 'Save'}
+                              </button>
+                            </div>
+                          ) : (
+                            <button onClick={() => handleEditParam(p)} className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium border border-slate-700">
+                              Edit
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Audit Log */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-white mb-1">Audit Log Trail</h2>
+            <p className="text-xs text-slate-400 mb-4">Recent system events and administrative actions for compliance monitoring</p>
+            {logs.length === 0 ? (
+              <div className="py-6 text-center text-slate-400 text-sm">No audit log entries found.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-950 text-xs uppercase text-slate-400">
+                    <tr>
+                      <th className="p-3">Timestamp</th>
+                      <th className="p-3">Actor</th>
+                      <th className="p-3">Action</th>
+                      <th className="p-3">Details</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {logs.slice(0, 20).map((log, i) => (
+                      <tr key={log.id || i} className="hover:bg-slate-800/40">
+                        <td className="p-3 text-slate-400 whitespace-nowrap">{log.timestamp ? new Date(log.timestamp).toLocaleString() : '—'}</td>
+                        <td className="p-3 font-semibold text-slate-200">{log.performedBy || '—'}</td>
+                        <td className="p-3"><span className="px-2 py-0.5 rounded bg-slate-800 text-amber-300 font-mono font-semibold text-[11px]">{log.action}</span></td>
+                        <td className="p-3 text-slate-400 max-w-md truncate">{log.details || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       );
     }
@@ -1364,18 +1816,23 @@
       const [email, setEmail] = useState('');
       const [loading, setLoading] = useState(false);
       const [message, setMessage] = useState('');
+      const [emailSent, setEmailSent] = useState(false);
       const [tokenInfo, setTokenInfo] = useState(null);
       const [error, setError] = useState('');
 
       const handleSubmit = async (e) => {
         e.preventDefault();
-        setError(''); setMessage(''); setTokenInfo(null);
+        setError(''); setMessage(''); setEmailSent(false); setTokenInfo(null);
         if (!email) { setError('Please enter your registered email address.'); return; }
         setLoading(true);
         try {
           const res = await authApi.forgotPassword(email);
-          setMessage(res.message || 'Reset token generated successfully.');
-          if (res.token) setTokenInfo({ token: res.token, expiryMinutes: res.expiryMinutes || 15 });
+          const sent = Boolean(res.emailSent);
+          setEmailSent(sent);
+          setMessage(res.message || (sent ? 'Password reset link sent to your email.' : 'Reset token generated successfully.'));
+          if (!sent && res.token) {
+            setTokenInfo({ token: res.token, expiryMinutes: res.expiryMinutes || 15 });
+          }
         } catch (err) {
           setError(err.message || 'Unable to process request.');
         } finally {
@@ -1389,13 +1846,29 @@
             <div className="text-center">
               <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-amber-500 to-orange-400 flex items-center justify-center font-black text-2xl text-slate-950 mb-3">?</div>
               <h2 className="text-2xl font-extrabold text-white">Reset Your Password</h2>
-              <p className="mt-1 text-sm text-slate-400">Receive an expiring single-use verification token</p>
+              <p className="mt-1 text-sm text-slate-400">Receive a password reset link via email</p>
             </div>
 
             {error && <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">{error}</div>}
             {message && <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm">{message}</div>}
 
-            {tokenInfo && (
+            {emailSent && (
+              <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/40 text-slate-200 space-y-3">
+                <div className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">Check Your Email Inbox</div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Click the <strong>Reset Password</strong> button in the email we sent, or copy the verification token from the email and paste it into the Reset Password form.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('/reset-password')}
+                  className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg text-sm transition"
+                >
+                  Open Reset Password Form &rarr;
+                </button>
+              </div>
+            )}
+
+            {!emailSent && tokenInfo && (
               <div className="p-4 rounded-xl bg-slate-950 border border-amber-500/40 text-slate-200 space-y-3">
                 <div className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Single-Use Token ({tokenInfo.expiryMinutes} Min Expiry)</div>
                 <div className="p-2.5 bg-slate-900 rounded font-mono text-xs text-amber-200 break-all select-all border border-slate-800">{tokenInfo.token}</div>
@@ -1422,7 +1895,7 @@
                 type="submit" disabled={loading}
                 className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition disabled:opacity-50"
               >
-                {loading ? 'Generating...' : 'Send Password Reset Token'}
+                {loading ? 'Sending...' : 'Send Password Reset Link'}
               </button>
             </form>
 
